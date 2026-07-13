@@ -1,0 +1,27 @@
+# cbindgen 配置:从 Rust 源生成宿主用的 C 头文件(wintermac_core.h)
+# 生成产物供 macOS(Swift 通过桥接头引入)与 Linux(GTK4 C/C++)使用。
+
+language = "C"
+pragma_once = true
+include_guard = "WINTERMAC_CORE_H"
+tab_width = 4
+documentation = true
+documentation_style = "doxy"
+
+# 头文件顶部说明(不含任何协议声明)。
+header = "/* 自动生成,请勿手改。源自 wintermac_core (Rust) 的 C ABI 导出。 */"
+
+# 只导出带 no_mangle 的 extern "C" 符号与 repr(C) 类型。
+[export]
+prefix = ""
+item_types = ["enums", "structs", "opaque", "typedefs", "functions"]
+
+[enum]
+prefix_with_name = true
+rename_variants = "QualifiedScreamingSnakeCase"
+
+[parse]
+parse_deps = false
+
+[fn]
+prefix = ""

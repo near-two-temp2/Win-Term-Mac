@@ -1,0 +1,45 @@
+{
+  "name": "win-term-mac-electron",
+  "version": "0.1.0",
+  "description": "Windows Terminal 窗格体验复刻 - Electron 基线方案",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "rebuild": "electron-rebuild -f -w node-pty",
+    "postinstall": "electron-rebuild -f -w node-pty",
+    "dist": "electron-builder",
+    "pack": "electron-builder --dir"
+  },
+  "author": "",
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0",
+    "xterm-addon-webgl": "^0.16.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3",
+    "electron-rebuild": "^3.2.9"
+  },
+  "build": {
+    "appId": "com.winttermmac.electron",
+    "productName": "WinTermMac",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "renderer/**/*"
+    ],
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

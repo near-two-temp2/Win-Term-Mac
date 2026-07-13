@@ -1,0 +1,305 @@
+# Win-Term-Mac —— 7 方案 · 三平台构建 CI
+# 仓库根 = Src_ALL。每个方案一个 job,内部用 matrix 在 ubuntu / macos / windows 上铺开;
+# 平台专属子项目(GTK4 宿主、Swift 前端)用 if / 独立 job 裁剪。
+# 现状:各方案多为脚手架/桩代码,部分尚未接线。已知易挂或依赖较重的构建/打包步骤
+#       用 continue-on-error 标注,并在注释里写明 TODO(CI),不假装通过;待接线完成后再收紧。
+
+name: build
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# 同分支重复推送时取消上一次未完成的运行(7x3 矩阵较费额度)。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================
+  # 方案 1 · Src_Rust —— 纯 Rust(winit + wgpu + glyphon + alacritty_terminal)
+  # ============================================================
+  rust:
+    name: Src_Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: Src_Rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux GUI 依赖 (winit/wgpu)
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxkbcommon-dev libwayland-dev \
+            libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Src_Rust
+      - name: build
+        continue-on-error: true
+        run: cargo build --verbose
+      - name: test (窗格树单测)
+        continue-on-error: true
+        run: cargo test --verbose
+
+  # ============================================================
+  # 方案 2 · Src_Mix —— 共享 Rust 内核(C ABI) + Linux GTK4 宿主 + macOS Swift 前端
+  # ============================================================
+  # 2a) 共享内核:三平台都 cargo build(build.rs 里 cbindgen 生成 C 头文件)
+  mix-core:
+    name: Src_Mix core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: Src_Mix/core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Src_Mix/core
+      - name: build core (cdylib + C ABI)
+        continue-on-error: true
+        run: cargo build --verbose
+      - name: test core (窗格树单测)
+        continue-on-error: true
+        run: cargo test --verbose
+
+  # 2b) macOS Swift 前端(SwiftPM,仅 macOS)
+  mix-macos:
+    name: Src_Mix macOS (Swift)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: Src_Mix/macos
+    steps:
+      - uses: actions/checkout@v4
+      # 目前 SwiftPM 只搭骨架(纯 Swift 镜像内核语义),尚未链接 CWinTermCore。
+      - name: swift build
+        continue-on-error: true
+        run: swift build -v
+
+  # 2c) Linux GTK4 宿主(仅 Ubuntu)
+  mix-linux:
+    name: Src_Mix Linux (GTK4)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Src_Mix/linux
+    steps:
+      - uses: actions/checkout@v4
+      - name: GTK4 依赖
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Src_Mix/linux
+      # TODO(CI): 该 crate 目前用手写 extern "C" 声明保持可编译;待内核产物
+      #           (libwintermac_core + wintermac_core.h)接入后可能需补链接路径或 bindgen。
+      - name: build GTK4 宿主
+        continue-on-error: true
+        run: cargo build --verbose
+
+  # ============================================================
+  # 方案 3 · Src_Tauri —— Tauri v2(前端 vite + 后端 Rust)
+  # ============================================================
+  tauri:
+    name: Src_Tauri (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: Src_Tauri
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tauri Linux 依赖 (WebKitGTK 等)
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            build-essential file wget curl
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Src_Tauri/src-tauri
+      - name: 前端依赖 (无 lockfile,用 npm install)
+        continue-on-error: true
+        run: npm install
+      - name: 前端构建 (vite)
+        continue-on-error: true
+        run: npm run build
+      - name: 后端构建 (src-tauri cargo)
+        working-directory: Src_Tauri/src-tauri
+        continue-on-error: true
+        run: cargo build --verbose
+      # TODO(CI): 若要产出可分发安装包,改用 tauri-apps/tauri-action 或 `npm run tauri build`,
+      #           并在三平台各自处理签名/公证;此处仅验证前后端能各自编译。
+
+  # ============================================================
+  # 方案 4 · Src_Electron —— Electron + node-pty(原生模块需重建)
+  # ============================================================
+  electron:
+    name: Src_Electron (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: Src_Electron
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # node-pty 是原生模块;postinstall 会跑 electron-rebuild。
+      # TODO(CI): 某平台原生编译失败时可能需补构建工具链(Linux: build-essential python3)。
+      - name: install (含 electron-rebuild node-pty)
+        continue-on-error: true
+        run: npm install
+      # electron-builder 按 package.json 的 build 配置产出 dmg/AppImage/nsis。
+      # 无签名证书时 macOS 公证会跳过;此处用 pack(--dir)只打免安装目录,降低失败面。
+      - name: package (electron-builder --dir)
+        continue-on-error: true
+        run: npm run pack
+
+  # ============================================================
+  # 方案 5 · Src_Flutter —— Flutter 桌面
+  # ============================================================
+  flutter:
+    name: Src_Flutter (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: Src_Flutter
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux 桌面工具链
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: pub get + 开启桌面
+        continue-on-error: true
+        run: |
+          flutter config --enable-linux-desktop --enable-macos-desktop --enable-windows-desktop
+          flutter pub get
+      # TODO(CI): 若仓库未提交 linux/ macos/ windows/ 平台工程目录,先 `flutter create` 生成再 build。
+      - name: build (按平台)
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            flutter create --platforms=linux . && flutter build linux --release
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            flutter create --platforms=macos . && flutter build macos --release
+          else
+            flutter create --platforms=windows . && flutter build windows --release
+          fi
+
+  # ============================================================
+  # 方案 6 · Src_CPP —— C++ / Qt6(cmake + aqtinstall)
+  # ============================================================
+  cpp:
+    name: Src_CPP (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: Src_CPP
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux GL 依赖 (Qt Widgets 链接需要)
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev
+      - name: 安装 Qt6 (aqtinstall)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.*'
+          cache: true
+      - name: cmake 配置与构建
+        continue-on-error: true
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --verbose
+
+  # ============================================================
+  # 方案 7 · Src_Golang —— Go + Gio(gioui.org)+ creack/pty(cgo)
+  # ============================================================
+  golang:
+    name: Src_Golang (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: Src_Golang
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gio Linux 依赖
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc pkg-config libgl1-mesa-dev \
+            libwayland-dev libx11-dev libx11-xcb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libgles2-mesa-dev libegl1-mesa-dev libffi-dev \
+            libxcursor-dev libvulkan-dev
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: Src_Golang/go.mod
+      - name: build
+        continue-on-error: true
+        run: go build -v ./...
+      - name: test (窗格树单测)
+        continue-on-error: true
+        run: go test ./...

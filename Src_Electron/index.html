@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:;" />
+  <title>WinTermMac - Electron 基线</title>
+
+  <!-- xterm.js 样式(来自本地 node_modules) -->
+  <link rel="stylesheet" href="node_modules/xterm/css/xterm.css" />
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #1e1e1e;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    /* #pane-root 未来会承载整棵窗格树;当前先放单个终端容器 */
+    #pane-root {
+      position: absolute;
+      inset: 0;
+    }
+    .terminal-host {
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      padding: 4px;
+    }
+  </style>
+</head>
+<body>
+  <!-- 窗格树的挂载根节点 -->
+  <div id="pane-root">
+    <div id="terminal" class="terminal-host"></div>
+  </div>
+
+  <!-- xterm.js 及插件(UMD 构建,挂载到 window:Terminal / FitAddon / WebglAddon) -->
+  <script src="node_modules/xterm/lib/xterm.js"></script>
+  <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+  <script src="node_modules/xterm-addon-webgl/lib/xterm-addon-webgl.js"></script>
+
+  <!-- 渲染进程入口 -->
+  <script src="renderer/index.js"></script>
+</body>
+</html>

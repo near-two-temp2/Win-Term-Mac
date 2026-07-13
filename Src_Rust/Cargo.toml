@@ -1,0 +1,28 @@
+[package]
+name = "win-term-mac"
+version = "0.1.0"
+edition = "2021"
+description = "Windows Terminal 风格窗格体验的纯 Rust 复刻(winit + wgpu + glyphon + alacritty_terminal)"
+
+[dependencies]
+# 窗口与事件循环
+winit = "0.30"
+# GPU 渲染
+wgpu = "22"
+# 文字排版与 GPU 文本渲染
+glyphon = "0.6"
+cosmic-text = "0.12"
+# 终端仿真
+alacritty_terminal = "0.24"
+# 跨平台 PTY
+portable-pty = "0.8"
+
+# 运行时辅助
+pollster = "0.3"   # 在 winit setup 中阻塞等待 wgpu 异步初始化
+raw-window-handle = "0.6"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

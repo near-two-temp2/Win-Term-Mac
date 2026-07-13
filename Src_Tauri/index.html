@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Win-Term-Mac · Tauri</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #1e1e1e;
+        overflow: hidden;
+      }
+      /* 窗格根容器:后续窗格二叉树(panes/)递归渲染到这里。
+         M0 阶段先塞一个占满窗口的终端容器。 */
+      #root {
+        width: 100vw;
+        height: 100vh;
+      }
+      .xterm-host {
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 单窗格容器(M0);M2 起由窗格树渲染逻辑接管 -->
+    <div id="root">
+      <div id="term-host" class="xterm-host"></div>
+    </div>
+    <!-- xterm.js 的 CSS 与 webgl addon 由 main.js 通过 npm 模块引入并初始化 -->
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

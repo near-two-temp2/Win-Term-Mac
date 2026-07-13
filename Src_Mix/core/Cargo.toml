@@ -1,0 +1,16 @@
+[package]
+name = "wintermac_core"
+version = "0.1.0"
+edition = "2021"
+description = "共享 Rust 内核:窗格二叉树 + C ABI 导出(供 macOS Swift / Linux GTK4 调用)"
+
+[lib]
+# cdylib 供 C ABI 动态链接;staticlib 备用;rlib 供 Rust 内部测试
+name = "wintermac_core"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+
+[build-dependencies]
+# 用于从 Rust 源生成 C/C++ 头文件(见 build.rs 与 cbindgen.toml)
+cbindgen = "0.27"

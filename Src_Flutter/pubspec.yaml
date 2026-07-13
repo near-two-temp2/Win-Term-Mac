@@ -1,0 +1,25 @@
+name: win_term_mac
+description: 把 Windows Terminal 的窗格体验复刻到桌面平台的 Flutter 方案。
+publish_to: "none"
+
+version: 0.1.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 终端仿真(渲染 + VT 解析)
+  xterm: ^4.0.0
+  # 跨平台 PTY(生成真实 shell 进程)
+  flutter_pty: ^0.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true

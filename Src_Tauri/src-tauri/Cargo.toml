@@ -1,0 +1,29 @@
+[package]
+name = "win-term-mac"
+version = "0.1.0"
+description = "Win-Term-Mac · Tauri 方案:Windows Terminal 窗格体验复刻"
+edition = "2021"
+rust-version = "1.77"
+
+# 二进制入口:src/main.rs
+[[bin]]
+name = "win-term-mac"
+path = "src/main.rs"
+
+# Tauri 构建脚本依赖(生成上下文、图标、权限等)
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 后端 PTY:跨平台起 shell,读写字节流。由 pty.rs(PTY 角色)使用。
+portable-pty = "0.8"
+
+[features]
+# 默认走生产构建;开发调试可在此追加特性开关。
+default = ["custom-protocol"]
+# Tauri 打包时用自定义协议加载前端产物,而非本地开发服务器。
+custom-protocol = ["tauri/custom-protocol"]
