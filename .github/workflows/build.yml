@@ -48,9 +48,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: Src_Rust
-      - name: build
+      - name: build (release)
         continue-on-error: true
-        run: cargo build --verbose
+        run: cargo build --release --verbose
       - name: test (窗格树单测)
         continue-on-error: true
         run: cargo test --verbose
@@ -59,7 +59,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Src_Rust-windows-exe
-          path: Src_Rust/target/debug/*.exe
+          path: Src_Rust/target/release/*.exe
           if-no-files-found: warn
 
   # ============================================================
@@ -168,8 +168,20 @@ jobs:
         working-directory: Src_Tauri/src-tauri
         continue-on-error: true
         run: cargo build --verbose
-      # TODO(CI): 若要产出可分发安装包,改用 tauri-apps/tauri-action 或 `npm run tauri build`,
-      #           并在三平台各自处理签名/公证;此处仅验证前后端能各自编译。
+      # 完整打包:tauri build 跑 beforeBuildCommand 打前端 → 塞进 exe → 出安装包。
+      - name: 完整打包 (tauri build, 仅 Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: npx --yes @tauri-apps/cli@^2 build
+      - name: 上传 Windows 打包 (exe + 安装包)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Src_Tauri-windows
+          path: |
+            Src_Tauri/src-tauri/target/release/*.exe
+            Src_Tauri/src-tauri/target/release/bundle/**
+          if-no-files-found: warn
 
   # ============================================================
   # 方案 4 · Src_Electron —— Electron + node-pty(原生模块需重建)
@@ -248,6 +260,13 @@ jobs:
           else
             flutter create --platforms=windows . && flutter build windows --release
           fi
+      - name: 上传 Windows 打包
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Src_Flutter-windows
+          path: Src_Flutter/build/windows/x64/runner/Release/**
+          if-no-files-found: warn
 
   # ============================================================
   # 方案 6 · Src_CPP —— C++ / Qt6(cmake + aqtinstall)
@@ -280,6 +299,23 @@ jobs:
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release --verbose
+      - name: 打包 Windows (windeployqt 收集 Qt DLL)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: bash
+        run: |
+          exe=$(find build -name '*.exe' | grep -iE 'release' | head -1)
+          [ -z "$exe" ] && exe=$(find build -name '*.exe' | head -1)
+          echo "found exe: $exe"
+          mkdir -p dist && cp "$exe" dist/
+          windeployqt --release --dir dist "dist/$(basename "$exe")" || windeployqt "dist/$(basename "$exe")" || true
+      - name: 上传 Windows 打包
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Src_CPP-windows
+          path: Src_CPP/dist/**
+          if-no-files-found: warn
 
   # ============================================================
   # 方案 7 · Src_Golang —— Go + Gio(gioui.org)+ creack/pty(cgo)
