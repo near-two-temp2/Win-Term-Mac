@@ -99,9 +99,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # 目前 SwiftPM 只搭骨架(纯 Swift 镜像内核语义),尚未链接 CWinTermCore。
-      - name: swift build
+      - name: swift build (release)
         continue-on-error: true
-        run: swift build -v
+        run: swift build -v -c release
+      - name: 上传 macOS 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Src_Mix-macos
+          path: Src_Mix/macos/.build/release/Sub
+          if-no-files-found: warn
 
   # 2c) Linux GTK4 宿主(仅 Ubuntu)
   mix-linux:
@@ -123,9 +129,20 @@ jobs:
           workspaces: Src_Mix/linux
       # TODO(CI): 该 crate 目前用手写 extern "C" 声明保持可编译;待内核产物
       #           (libwintermac_core + wintermac_core.h)接入后可能需补链接路径或 bindgen。
-      - name: build GTK4 宿主
+      - name: build GTK4 宿主 (release)
         continue-on-error: true
-        run: cargo build --verbose
+        run: cargo build --release --verbose
+      - name: 收集 Linux 产物
+        continue-on-error: true
+        run: |
+          mkdir -p ../_dist
+          find target/release -maxdepth 1 -type f -perm -u+x ! -name '*.d' -exec cp {} ../_dist/ \; || true
+      - name: 上传 Linux 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Src_Mix-linux
+          path: Src_Mix/_dist/**
+          if-no-files-found: warn
 
   # ============================================================
   # 方案 3 · Src_Tauri —— Tauri v2(前端 vite + 后端 Rust)
