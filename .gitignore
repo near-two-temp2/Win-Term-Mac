@@ -1,0 +1,10 @@
+# 循环/会话本地状态(勿提交)
+.claude/
+
+# 构建产物 / 依赖
+node_modules/
+target/
+build/
+dist/
+.dart_tool/
+*.log

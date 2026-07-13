@@ -8,6 +8,8 @@ mod pane; // 窗格二叉树:split / swap / move / navigate / walk / maximize
 mod term; // 终端仿真 + PTY(alacritty_terminal + portable-pty)
 mod palette; // 命令面板:低频强力操作(交换/移动窗格)入口
 mod keymap; // 键位映射:热键与命令面板触发
+mod render; // 文本渲染(glyphon + cosmic-text):把终端网格画到 wgpu 表面
+mod input; // 键盘事件 → 写入 PTY 的字节序列
 
 use std::sync::Arc;
 
@@ -23,6 +25,12 @@ struct GpuState {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     window: Arc<Window>,
+    /// 文本渲染器(glyphon):消费 term 的网格快照逐格绘制。
+    renderer: render::Renderer,
+    /// 当前聚焦的终端叶子(暂为单终端;接入窗格树后改为按 pane 管理)。
+    terminal: term::Terminal,
+    /// 当前修饰键状态,供键盘输入翻译。
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 impl GpuState {
@@ -84,12 +92,22 @@ impl GpuState {
         };
         surface.configure(&device, &config);
 
+        // 文本渲染器 + 终端叶子:先建渲染器(拿到单元格尺寸),
+        // 再据窗口像素反推初始网格行列,启动子 shell。
+        let scale_factor = window.scale_factor() as f32;
+        let renderer = render::Renderer::new(&device, &queue, format, width, height, scale_factor);
+        let (cols, rows) = renderer.grid_size_for(width, height);
+        let terminal = term::Terminal::spawn(cols, rows, None).expect("启动子 shell 失败");
+
         Self {
             surface,
             device,
             queue,
             config,
             window,
+            renderer,
+            terminal,
+            modifiers: winit::keyboard::ModifiersState::empty(),
         }
     }
 
@@ -101,12 +119,19 @@ impl GpuState {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+
+        // 同步渲染器像素尺寸,并据此把终端网格 resize 到新的行列数
+        //(会通过 PTY 通知子进程 SIGWINCH)。
+        self.renderer.resize(width, height);
+        let (cols, rows) = self.renderer.grid_size_for(width, height);
+        self.terminal.resize(cols, rows);
     }
 
-    /// 渲染一帧。当前仅清屏为背景色。
-    // TODO(render): 在此把窗格树(pane)与各叶子终端(term)绘制上去;
-    //               命令面板(palette)作为覆盖层在最后绘制。
+    /// 渲染一帧:抽取子进程输出 → 清屏 → 叠加终端网格文字。
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        // 抽干 PTY 输出并更新仿真网格(非阻塞)。
+        self.terminal.pump();
+
         let frame = self.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -141,6 +166,12 @@ impl GpuState {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // 在清屏之上叠加终端网格文字(glyphon 内部以 LoadOp::Load 自行提交)。
+        let snapshot = self.terminal.snapshot();
+        self.renderer
+            .render(&snapshot, &self.device, &self.queue, &view);
+
         frame.present();
         Ok(())
     }
@@ -198,7 +229,16 @@ impl ApplicationHandler for App {
                     Err(e) => log::warn!("渲染跳过一帧: {e:?}"),
                 }
             }
-            // TODO(input): 键盘事件交给 keymap 解析,再分发到 pane / palette。
+            WindowEvent::ModifiersChanged(new_mods) => {
+                gpu.modifiers = new_mods.state();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                // 约定:先给 keymap 判窗格热键,非热键再作为输入送进聚焦终端。
+                // TODO(keymap): 接入 keymap 处理 Alt+方向 / Alt+Shift+± 等窗格操作。
+                if let Some(bytes) = input::key_to_bytes(&event, gpu.modifiers) {
+                    let _ = gpu.terminal.write_input(&bytes);
+                }
+            }
             _ => {}
         }
     }

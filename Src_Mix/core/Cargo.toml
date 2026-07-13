@@ -10,6 +10,10 @@ name = "wintermac_core"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+# io/bridge 模块(PTY 双向管道)所需:Unix 的 forkpty / ioctl / waitpid 等。
+# 仅 Unix 目标(macOS / Linux)实际链接;非 Unix 目标编译为功能桩,不用到它。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 # 用于从 Rust 源生成 C/C++ 头文件(见 build.rs 与 cbindgen.toml)

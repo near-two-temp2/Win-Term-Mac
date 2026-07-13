@@ -13,24 +13,26 @@
         background: #1e1e1e;
         overflow: hidden;
       }
-      /* 窗格根容器:后续窗格二叉树(panes/)递归渲染到这里。
-         M0 阶段先塞一个占满窗口的终端容器。 */
+      /* 窗格根容器:窗格二叉树(pane.js layout)递归渲染到这里。
+         controller.js 每次结构变化都会重排其内部 DOM。 */
       #root {
         width: 100vw;
         height: 100vh;
       }
-      .xterm-host {
-        width: 100%;
-        height: 100%;
+      /* 当前聚焦窗格的可见高亮(pane.js 生成的叶子容器带 .pane-leaf)。 */
+      .pane-leaf {
+        box-sizing: border-box;
+        border: 1px solid transparent;
+      }
+      .pane-leaf:focus-within {
+        border-color: #0a84ff;
       }
     </style>
   </head>
   <body>
-    <!-- 单窗格容器(M0);M2 起由窗格树渲染逻辑接管 -->
-    <div id="root">
-      <div id="term-host" class="xterm-host"></div>
-    </div>
-    <!-- xterm.js 的 CSS 与 webgl addon 由 main.js 通过 npm 模块引入并初始化 -->
+    <!-- 窗格树根容器;首绘由 main.js 的 mountController 接管(建树 + 起真实 PTY) -->
+    <div id="root"></div>
+    <!-- 模块入口:装配 term/pane/palette/keymap/controller -->
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

@@ -18,31 +18,30 @@
       overflow: hidden;
       font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     }
-    /* #pane-root 未来会承载整棵窗格树;当前先放单个终端容器 */
+    /* #pane-root 承载整棵窗格树;叶子容器由 PaneCore(pane.js)自行创建 */
     #pane-root {
       position: absolute;
       inset: 0;
     }
-    .terminal-host {
-      width: 100%;
-      height: 100%;
-      box-sizing: border-box;
-      padding: 4px;
-    }
   </style>
 </head>
 <body>
-  <!-- 窗格树的挂载根节点 -->
-  <div id="pane-root">
-    <div id="terminal" class="terminal-host"></div>
-  </div>
+  <!-- 窗格树的挂载根节点(PaneManager 会在此建立布局与各叶子终端) -->
+  <div id="pane-root"></div>
 
   <!-- xterm.js 及插件(UMD 构建,挂载到 window:Terminal / FitAddon / WebglAddon) -->
   <script src="node_modules/xterm/lib/xterm.js"></script>
   <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
   <script src="node_modules/xterm-addon-webgl/lib/xterm-addon-webgl.js"></script>
 
-  <!-- 渲染进程入口 -->
+  <!-- 窗格模块(按依赖顺序:核心树 → 键位 → 命令面板 → 叶子终端 → 胶水控制器) -->
+  <script src="renderer/pane.js"></script>
+  <script src="renderer/keymap.js"></script>
+  <script src="renderer/palette.js"></script>
+  <script src="renderer/terminal.js"></script>
+  <script src="renderer/panes.js"></script>
+
+  <!-- 渲染进程入口:一句 PaneManager.create 装配整套视图 -->
   <script src="renderer/index.js"></script>
 </body>
 </html>

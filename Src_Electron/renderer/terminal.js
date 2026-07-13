@@ -33,7 +33,8 @@
 
   // 创建一个绑定到 host 元素的终端叶子。
   //   host     承载终端的 DOM 元素(应已挂到文档中并具有尺寸)
-  //   options  { fontFamily, fontSize, theme, shell, cwd, env, onExit, onTitle }
+  //   options  { fontFamily, fontSize, theme, shell, cwd, env, onExit, onTitle, onFocus }
+  //            onFocus(): 该终端获得键盘焦点时回调(供窗格树标记当前焦点窗格)
   // 返回句柄:{ id, term, fit, focus, write, dispose, isReady }
   function createLeafTerminal(host, options) {
     options = options || {};
@@ -59,6 +60,17 @@
     // 3) 尝试 WebGL 加速,失败则回退默认渲染
     try {
       const webgl = new WebglAddon.WebglAddon();
+      // WebGL 上下文丢失(GPU 驱动重置、显卡切换、长时间隐藏)时自动卸载加速插件,
+      // 让 xterm 回退到默认 canvas/DOM 渲染,避免终端变白屏。
+      if (typeof webgl.onContextLoss === 'function') {
+        webgl.onContextLoss(() => {
+          try {
+            webgl.dispose();
+          } catch (e) {
+            /* 忽略 */
+          }
+        });
+      }
       term.loadAddon(webgl);
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -71,6 +83,34 @@
     let sessionId = null;
     let disposed = false;
     const cleanups = [];
+
+    // 容器尺寸变化时自动 fit:用 ResizeObserver 让终端网格跟随窗格布局/窗口尺寸变化,
+    // 不必依赖外部显式调用 fit()。用 rAF 合并高频回调,避免拖拽分隔条时频繁 resize。
+    if (typeof ResizeObserver !== 'undefined') {
+      let rafPending = false;
+      const ro = new ResizeObserver(() => {
+        if (rafPending) return;
+        rafPending = true;
+        const run = () => {
+          rafPending = false;
+          fit();
+        };
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+        else run();
+      });
+      ro.observe(host);
+      cleanups.push(() => ro.disconnect());
+    }
+
+    // 焦点上报:用户点击 / Tab 进入该终端时通知调用方(供窗格树标记当前焦点窗格,
+    // navigate / swap / move 均以焦点窗格为基准)。xterm 的可聚焦元素是其内部 textarea。
+    if (typeof options.onFocus === 'function' && term.textarea) {
+      const onFocusEl = () => options.onFocus();
+      term.textarea.addEventListener('focus', onFocusEl);
+      cleanups.push(() => {
+        if (term.textarea) term.textarea.removeEventListener('focus', onFocusEl);
+      });
+    }
 
     // 若桥接缺失,直接给出提示并返回一个"空壳"句柄
     if (!bridge) {
@@ -200,10 +240,32 @@
   // 它会在叶子首次挂载时创建终端并存到 leaf.data,并在布局尺寸变化时 fit 所有终端。
   function paneHooks(termOptions) {
     termOptions = termOptions || {};
+    const userOnFocus = typeof termOptions.onFocus === 'function' ? termOptions.onFocus : null;
+
+    let layoutRef = null; // 由 onResize 捕获,供焦点回写用
+    let pendingFocus = null; // 首次 render 前发生的焦点事件,延迟到有 state 时应用
+
+    // 把某叶子标记为当前焦点窗格:写入 state.focus 并轻量更新高亮(不整树重渲染)。
+    function setFocus(leaf) {
+      if (!layoutRef) {
+        pendingFocus = leaf;
+        return;
+      }
+      if (layoutRef.focus === leaf) return;
+      layoutRef.focus = leaf;
+      updateFocusHighlight(layoutRef);
+    }
+
     return {
       // PaneCore 为叶子创建 el 后回调
       onLeafMount(leaf) {
-        leaf.data = createLeafTerminal(leaf.el, termOptions);
+        const leafOptions = Object.assign({}, termOptions, {
+          onFocus: function () {
+            setFocus(leaf);
+            if (userOnFocus) userOnFocus(leaf);
+          },
+        });
+        leaf.data = createLeafTerminal(leaf.el, leafOptions);
         // 新叶子获得焦点(贴合 WT:拆分后焦点落到新窗格)
         if (leaf.data && typeof leaf.data.focus === 'function') {
           // 交给下一帧,确保 DOM 已布局
@@ -215,9 +277,37 @@
       // 布局尺寸变化后回调:对所有叶子终端 fit
       onResize(state) {
         if (!state || typeof state.root === 'undefined') return;
+        layoutRef = state;
+        if (pendingFocus) {
+          state.focus = pendingFocus;
+          pendingFocus = null;
+          updateFocusHighlight(state);
+        }
         forEachLeafTerminal(state.root, (h) => h.fit());
       },
     };
+  }
+
+  // 轻量更新焦点高亮:只切换叶子 el 上的 'pane-focused' class(与 pane.js 约定一致),
+  // 不触发整棵树重渲染,避免每次切焦点都重新 fit 导致抖动。
+  function updateFocusHighlight(state) {
+    if (!state || !state.root) return;
+    forEachLeaf(state.root, (leaf) => {
+      if (leaf.el && leaf.el.classList) {
+        leaf.el.classList.toggle('pane-focused', leaf === state.focus);
+      }
+    });
+  }
+
+  // 遍历树上的所有叶子节点(节点本身,非终端句柄)。与 PaneCore 结构约定解耦。
+  function forEachLeaf(node, fn) {
+    if (!node) return;
+    if (node.type === 'leaf') {
+      fn(node);
+      return;
+    }
+    forEachLeaf(node.first, fn);
+    forEachLeaf(node.second, fn);
   }
 
   // 遍历树,对每个持有终端句柄的叶子执行 fn。与 PaneCore 结构解耦(只看 type/data)。
@@ -231,5 +321,17 @@
     forEachLeafTerminal(node.second, fn);
   }
 
-  return { createLeafTerminal, paneHooks, forEachLeafTerminal };
+  // integrator 需要如何调用我(在 index.js 里,不要改本文件):
+  //   1) index.html 需先以 UMD 挂载 Terminal / FitAddon / WebglAddon 到 window,
+  //      并加载 renderer/pane.js(PaneCore)、renderer/terminal.js(本模块)。
+  //   2) 建布局:
+  //        const layout = PaneCore.createLayout(document.getElementById('pane-root'),
+  //                                             LeafTerminal.paneHooks({ shell, cwd, fontSize }));
+  //        layout.setRoot(PaneCore.makeLeaf());   // 初始单终端
+  //      paneHooks 已把"终端获得焦点 -> layout.focus = 该叶子 + 高亮"接好,
+  //      因此 navigate/swap/move 可直接以 layout.focus 作为当前窗格基准。
+  //   3) 拆分后:layout.setRoot(PaneCore.split(...)) 会触发 onLeafMount 建新终端并自动聚焦;
+  //      本模块用 ResizeObserver 自动 fit,通常无需再手动调 fit。
+  //   4) index.html 需为 .pane-focused 提供一条高亮样式(如 outline),否则焦点无视觉反馈。
+  return { createLeafTerminal, paneHooks, forEachLeafTerminal, forEachLeaf, updateFocusHighlight };
 });
