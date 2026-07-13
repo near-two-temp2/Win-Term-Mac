@@ -300,12 +300,18 @@ jobs:
         working-directory: Src_CPP
     steps:
       - uses: actions/checkout@v4
-      - name: Linux GL 依赖 (Qt Widgets 链接需要)
+      - name: Linux 依赖 (GL + libvterm)
         if: runner.os == 'Linux'
         working-directory: .
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libvterm-dev
+      - name: macOS libvterm
+        if: runner.os == 'macOS'
+        run: brew install libvterm
+      - name: Windows libvterm (vcpkg)
+        if: runner.os == 'Windows'
+        run: vcpkg install libvterm:x64-windows
       - name: 安装 Qt6 (aqtinstall)
         uses: jurplel/install-qt-action@v4
         with:
@@ -313,8 +319,13 @@ jobs:
           cache: true
       - name: cmake 配置与构建
         continue-on-error: true
+        shell: bash
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          TOOLCHAIN=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            TOOLCHAIN="-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows"
+          fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $TOOLCHAIN
           cmake --build build --config Release --verbose
       - name: 打包 Windows (windeployqt 收集 Qt DLL)
         if: runner.os == 'Windows'

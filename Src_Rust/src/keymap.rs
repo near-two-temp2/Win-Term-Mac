@@ -187,7 +187,8 @@ pub struct Binding {
 /// Windows Terminal 默认键位表。`Alt` 类绑定跨平台一致;`Primary` 类绑定
 /// 会在 [`Keymap::resolve`] 时按平台解释为 Ctrl / Cmd。
 pub fn default_bindings() -> Vec<Binding> {
-    use Direction::*;
+    // 注意:不 glob 导入 Direction(它与 Key 都有 Left/Right/Up/Down,会歧义);
+    // 方向值显式写 Direction::Xxx,按键值走 Key::* 的 glob。
     use Key::*;
     use Mod::*;
 
@@ -219,15 +220,15 @@ pub fn default_bindings() -> Vec<Binding> {
             },
         ),
         // 切换焦点:Alt+方向键。
-        b(&[Alt], Left, Action::MoveFocus { dir: Left }),
-        b(&[Alt], Right, Action::MoveFocus { dir: Right }),
-        b(&[Alt], Up, Action::MoveFocus { dir: Up }),
-        b(&[Alt], Down, Action::MoveFocus { dir: Down }),
+        b(&[Alt], Left, Action::MoveFocus { dir: Direction::Left }),
+        b(&[Alt], Right, Action::MoveFocus { dir: Direction::Right }),
+        b(&[Alt], Up, Action::MoveFocus { dir: Direction::Up }),
+        b(&[Alt], Down, Action::MoveFocus { dir: Direction::Down }),
         // 调整大小:Alt+Shift+方向键。
-        b(&[Alt, Shift], Left, Action::ResizePane { dir: Left }),
-        b(&[Alt, Shift], Right, Action::ResizePane { dir: Right }),
-        b(&[Alt, Shift], Up, Action::ResizePane { dir: Up }),
-        b(&[Alt, Shift], Down, Action::ResizePane { dir: Down }),
+        b(&[Alt, Shift], Left, Action::ResizePane { dir: Direction::Left }),
+        b(&[Alt, Shift], Right, Action::ResizePane { dir: Direction::Right }),
+        b(&[Alt, Shift], Up, Action::ResizePane { dir: Direction::Up }),
+        b(&[Alt, Shift], Down, Action::ResizePane { dir: Direction::Down }),
         // 最大化 / 还原当前窗格。
         b(&[Primary, Shift], Char('z'), Action::TogglePaneZoom),
         // 关闭窗格:Ctrl+Shift+W(macOS: Cmd+Shift+W)。

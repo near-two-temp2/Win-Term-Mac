@@ -16,7 +16,8 @@ gtk4 = { version = "0.9", package = "gtk4", features = ["v4_10"] }
 # VTE4(GTK4 版终端仿真控件)Rust 绑定:真实终端视图用它 spawn shell 并渲染输出。
 # 由 term 角色(src/termview.rs)使用。需要系统安装 libvte-2.91-gtk4-dev
 # (pkg-config 找得到 vte-2.91-gtk4)。若 spawn_async 签名报错,按所装 vte4 版本微调。
-vte4 = "0.7"
+# vte4 0.8 依赖 gtk4 0.9(与上面的 gtk4 对齐,避免 gtk4-sys link 冲突)。
+vte4 = "0.8"
 
 # 共享 Rust 内核:窗格二叉树 + C ABI(wtm_tree_* / wtm_pty_*)。
 # 作为 Rust path 依赖引入即可让 core 的 `#[no_mangle] extern "C"` 符号被链接进

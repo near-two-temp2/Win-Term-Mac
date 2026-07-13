@@ -229,7 +229,10 @@ impl Terminal {
         loop {
             match self.rx.try_recv() {
                 Ok(chunk) => {
-                    self.parser.advance(&mut self.term, &chunk);
+                    // vte 0.13 的 Processor::advance 按单字节推进。
+                    for &byte in &chunk {
+                        self.parser.advance(&mut self.term, byte);
+                    }
                     dirty = true;
                 }
                 Err(TryRecvError::Empty) => break,
