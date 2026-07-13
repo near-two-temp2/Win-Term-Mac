@@ -2,18 +2,21 @@
 //
 // 一个"叶子"= 一个 LeafTerminal 实例。它负责:
 //   - 创建 xterm(+ FitAddon 自适应 + 可选 WebglAddon 加速);
-//   - 通过 window.ptyBridge 创建 PTY 会话,双向搬运数据:
+//   - 通过 IoBridge(renderer/io.js)创建 PTY 会话并双向搬运数据:
 //       PTY.onData  -> term.write     (终端输出)
 //       term.onData -> bridge.input   (用户键入)
-//   - fit() 时把新的 cols/rows 同步给 PTY(bridge.resize);
-//   - dispose() 时解绑 IPC 订阅并 kill 会话。
+//     IoBridge 在整个渲染进程只订阅一次 pty:data/pty:exit,用 Map<sessionId> 做 O(1)
+//     路由,取代此前每个叶子各自 onData 再按 id===sessionId 过滤的 O(N)/包 方案。
+//   - fit() 时把新的 cols/rows 同步给 PTY(session.syncSize);
+//   - dispose() 时解绑订阅并 kill 会话。
 //
 // 与 PaneCore(pane.js)集成:createLayout 的 onLeafMount(leaf) 里对
 // leaf.el 调用 createLeafTerminal,把返回的句柄存到 leaf.data;onResize 里
 // 对每个叶子的句柄调用 fit()。见文件末尾的 attachToPaneLayout 便捷封装。
 //
 // 依赖(由 index.html 以 UMD 方式挂到 window):Terminal / FitAddon / WebglAddon。
-// 桥接依赖(由 preload.js 注入):window.ptyBridge。
+// 数据平面依赖(renderer/io.js,须在本模块之前加载):window.IoBridge。
+// 桥接依赖(由 preload.js 注入):window.ptyBridge(IoBridge 内部使用)。
 
 (function (root, factory) {
   const api = factory();
@@ -39,7 +42,8 @@
   function createLeafTerminal(host, options) {
     options = options || {};
 
-    const bridge = typeof window !== 'undefined' ? window.ptyBridge : null;
+    // 数据平面统一走 IoBridge(renderer/io.js):单点订阅 + O(1) 路由。
+    const IoBridge = typeof window !== 'undefined' ? window.IoBridge : null;
 
     // 1) xterm 实例
     const term = new Terminal({
@@ -80,7 +84,7 @@
     // 首次 fit(host 需已有尺寸;若为 0 会在后续 onResize 再 fit)
     safeFit();
 
-    let sessionId = null;
+    let session = null; // IoBridge 会话句柄(异步就绪;connect 立即返回)
     let disposed = false;
     const cleanups = [];
 
@@ -112,57 +116,34 @@
       });
     }
 
-    // 若桥接缺失,直接给出提示并返回一个"空壳"句柄
-    if (!bridge) {
-      term.writeln('\x1b[31m[错误] ptyBridge 未注入,请检查 preload.js\x1b[0m');
+    // 若数据平面缺失,直接给出提示并返回一个"空壳"句柄
+    if (!IoBridge || typeof IoBridge.connect !== 'function') {
+      term.writeln('\x1b[31m[错误] IoBridge 未加载,请检查 index.html 是否引入 renderer/io.js\x1b[0m');
       return handle();
     }
 
-    // 4) 订阅主进程推送的 PTY 输出 / 退出
-    const offData = bridge.onData(({ id, data }) => {
-      if (id === sessionId) term.write(data);
-    });
-    const offExit = bridge.onExit(({ id, exitCode }) => {
-      if (id === sessionId) {
+    // 4) 创建并绑定 PTY 会话。IoBridge 负责:
+    //    输出(PTY -> term.write)、输入(term.onData -> PTY)、尺寸补发、退出/错误回调,
+    //    以及在会话销毁前若异步就绪则回收——本模块不再手动订阅 onData/onExit 或接线输入。
+    session = IoBridge.connect(term, {
+      cols: term.cols,
+      rows: term.rows,
+      shell: options.shell,
+      cwd: options.cwd,
+      env: options.env,
+      onExit: (exitCode) => {
+        if (disposed) return;
         term.writeln(`\r\n\x1b[90m[会话已结束 code=${exitCode}]\x1b[0m`);
-        sessionId = null;
         if (typeof options.onExit === 'function') options.onExit(exitCode);
-      }
+      },
+      onError: (msg) => {
+        if (disposed) return;
+        term.writeln(`\x1b[31m[错误] 无法创建终端会话: ${msg}\x1b[0m`);
+        term.writeln('\x1b[90m提示:请先执行 npm install 与 npm run rebuild 编译 node-pty。\x1b[0m');
+      },
     });
-    cleanups.push(offData, offExit);
-
-    // 5) 创建 PTY 会话,把当前维度告知主进程
-    bridge
-      .create({
-        cols: term.cols,
-        rows: term.rows,
-        shell: options.shell,
-        cwd: options.cwd,
-        env: options.env,
-      })
-      .then((res) => {
-        if (disposed) {
-          // 组件已在异步返回前被销毁:立刻回收会话
-          if (res && res.ok) bridge.kill(res.id);
-          return;
-        }
-        if (!res || !res.ok) {
-          term.writeln(`\x1b[31m[错误] 无法创建终端会话: ${res && res.error}\x1b[0m`);
-          term.writeln('\x1b[90m提示:请先执行 npm install 与 npm run rebuild 编译 node-pty。\x1b[0m');
-          return;
-        }
-        sessionId = res.id;
-        // 用户键入 -> 转发给 PTY
-        const inputSub = term.onData((data) => {
-          if (sessionId) bridge.input(sessionId, data);
-        });
-        cleanups.push(() => inputSub.dispose());
-        // 会话建立后再 fit 一次并同步尺寸,确保 shell 拿到正确的 cols/rows
-        fit();
-      })
-      .catch((err) => {
-        if (!disposed) term.writeln(`\x1b[31m[错误] 创建会话异常: ${err.message}\x1b[0m`);
-      });
+    // 会话就绪后再 fit 一次并同步尺寸,确保 shell 拿到正确的 cols/rows
+    session.onReady(() => fit());
 
     // 可选:标题变化回调(供标签/窗格标题使用)
     if (typeof options.onTitle === 'function') {
@@ -180,11 +161,11 @@
       }
     }
 
-    // fit + 把新尺寸同步给 PTY
+    // fit + 把新尺寸同步给 PTY(会话未就绪时 IoBridge 会暂存,就绪后补发)
     function fit() {
       if (disposed) return;
       safeFit();
-      if (sessionId) bridge.resize(sessionId, term.cols, term.rows);
+      if (session) session.syncSize(term);
     }
 
     function focus() {
@@ -206,9 +187,9 @@
           /* 忽略 */
         }
       }
-      if (sessionId) {
-        bridge.kill(sessionId);
-        sessionId = null;
+      if (session) {
+        session.dispose(); // 解绑输入订阅并 kill PTY 会话(幂等)
+        session = null;
       }
       try {
         term.dispose();
@@ -220,14 +201,15 @@
     function handle() {
       return {
         get id() {
-          return sessionId;
+          return session ? session.id : null;
         },
         term,
         fit,
         focus,
         write,
         dispose,
-        isReady: () => sessionId !== null,
+        // 就绪且未退出才算可接收输入
+        isReady: () => !!session && session.isReady() && !session.exited,
       };
     }
 

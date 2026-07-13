@@ -240,8 +240,16 @@
           if (!focus) return true;
           const all = PaneCore.leaves(st.root);
           if (all.length <= 1) {
-            // 最后一个窗格:不在此处关窗(那是主进程/标签层的职责)。
-            // TODO(integrator): 若希望关闭最后一个窗格即退出应用,可在此回调 window.close 等。
+            // 关闭最后一个窗格:先回收其终端 / PTY 会话,再决定窗口去留。
+            //   - 若集成层传入 onLastPaneClosed(如标签层要保留窗口/新建标签),交给它裁决;
+            //   - 否则默认关闭当前窗口(window.close 触发主进程 window-all-closed →
+            //     PtyManager.killAll → 非 macOS 下退出应用),贴合"关掉唯一窗格即关窗"的直觉。
+            if (focus.data && typeof focus.data.dispose === 'function') focus.data.dispose();
+            if (typeof opts.onLastPaneClosed === 'function') {
+              opts.onLastPaneClosed(focus);
+            } else if (typeof window !== 'undefined' && typeof window.close === 'function') {
+              window.close();
+            }
             return true;
           }
           const sibling = siblingLeaf(PaneCore, focus);

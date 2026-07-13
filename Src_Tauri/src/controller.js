@@ -212,7 +212,9 @@ export function createController(opts = {}) {
   const controller = {
     // dir: "row"(右) | "column"(下)
     split(dir) {
-      if (zoomId) return; // 最大化态下不拆分(先还原更符合直觉)
+      // 最大化态下拆分:先自动退出 zoom(否则新窗格会被隐藏,表现为静默 no-op),
+      // 再拆分并让 relayout 渲染完整树,新窗格立即可见。
+      if (zoomId) zoomId = null;
       apply(reduceSplit(currentFocusState(), dir));
     },
     // dir: left/right/up/down —— 换焦点,无需重排,只聚焦

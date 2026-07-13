@@ -364,6 +364,9 @@ jobs:
         with:
           go-version: '1.22'
           cache-dependency-path: Src_Golang/go.mod
+      - name: go mod tidy (仓库缺 go.sum,联网补齐)
+        continue-on-error: true
+        run: go mod tidy
       - name: build
         continue-on-error: true
         run: go build -v ./...

@@ -6,7 +6,9 @@ version: 0.1.0
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
-  flutter: ">=3.19.0"
+  # 代码用到 Color.withValues(alpha:)(3.27+)与 surfaceContainerHighest(3.22+),
+  # 因此最低要求 Flutter 3.27。
+  flutter: ">=3.27.0"
 
 dependencies:
   flutter:

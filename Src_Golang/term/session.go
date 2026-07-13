@@ -6,6 +6,10 @@
 //   - Close()/Wait()/Done():生命周期管理
 //
 // 并发模型对齐 README:每个终端会话一条读循环 goroutine + channel,读写解耦。
+//
+// 关于 PTY 的平台隔离:起 PTY / 改尺寸的实现放在 pty_unix.go(!windows,用
+// creack/pty)与 pty_windows.go(windows,桩)两个带构建标签的文件里。session.go
+// 本身不 import creack/pty,故 Windows 构建根本不会触碰该依赖,三平台均可编译。
 package term
 
 import (
@@ -15,8 +19,6 @@ import (
 	"os/exec"
 	"runtime"
 	"sync"
-
-	"github.com/creack/pty"
 )
 
 // Options 描述一个会话的启动参数。零值即用平台默认 shell、80x24。
@@ -73,8 +75,7 @@ func Start(opts Options) (*Session, error) {
 		cmd.Dir = opts.Dir
 	}
 
-	ws := &pty.Winsize{Rows: uint16(opts.Rows), Cols: uint16(opts.Cols)}
-	ptmx, err := pty.StartWithSize(cmd, ws)
+	ptmx, err := startPTY(cmd, opts.Cols, opts.Rows)
 	if err != nil {
 		return nil, err
 	}
@@ -134,8 +135,7 @@ func (s *Session) Resize(cols, rows int) error {
 	if s.ptmx == nil {
 		return os.ErrClosed
 	}
-	ws := &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}
-	if err := pty.Setsize(s.ptmx, ws); err != nil {
+	if err := resizePTY(s.ptmx, cols, rows); err != nil {
 		return err
 	}
 	s.grid.Resize(cols, rows)

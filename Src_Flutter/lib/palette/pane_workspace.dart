@@ -9,9 +9,10 @@
 //   pane_tree_view.dart —— 把窗格树画成真终端 + 可拖拽分隔条。
 //
 // 装配内容:
-//   1) Shortcuts(Keymap.buildShortcuts) + Actions(PaneActionIntent) 把热键接到
-//      控制器:拆分 / 切焦点(Alt+方向)/ 调整大小(Alt+Shift+方向)/ 命令面板
-//      (Ctrl/Cmd+Shift+P)/ 关闭 / 最大化。
+//   1) Focus.onKeyEvent 复用 Keymap.buildShortcuts 的键位表,拦截冒泡上来的
+//      热键并分派到控制器:拆分 / 切焦点(Alt+方向)/ 调整大小(Alt+Shift+方向)
+//      / 命令面板(Ctrl/Cmd+Shift+P)/ 关闭 / 最大化。终端侧配套放行这些组合
+//      (见 term/terminal_session.dart),否则会被 xterm 的输入处理器吃掉。
 //   2) 命令面板:Ctrl/Cmd+Shift+P 打开,复用 defaultPaletteCommands;可搜索。
 //   3) swap / move **仅命令面板触发**,且是两段式:先在面板选“交换/移动窗格”,
 //      面板关闭后再弹出“目标窗格选择器”(同样是可搜索的命令面板),选中目标后
@@ -35,6 +36,7 @@
 // -----------------------------------------------------------------------------
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
 import '../keymap/keymap.dart';
@@ -76,6 +78,10 @@ class _PaneWorkspaceState extends State<PaneWorkspace> {
 
   /// 第一段面板里选了 swap/move 时暂存的意图;面板关闭后据此进入第二段。
   PaneAction? _pendingTargetAction;
+
+  /// 当前平台的窗格键位表(每次 build 依平台刷新);[_handleKeyEvent] 据此匹配。
+  Map<ShortcutActivator, Intent> _shortcuts =
+      const <ShortcutActivator, Intent>{};
 
   @override
   void initState() {
@@ -232,44 +238,51 @@ class _PaneWorkspaceState extends State<PaneWorkspace> {
   }
 
   // ---------------------------------------------------------------------------
-  // 装配:Shortcuts + Actions + 视图
+  // 装配:Focus.onKeyEvent 热键拦截 + 视图
   // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
     final platform = Theme.of(context).platform;
+    // 依平台刷新键位表(macOS 用 Cmd,其余用 Ctrl;Alt 系列不变),
+    // 供 [_handleKeyEvent] 匹配冒泡上来的按键。
+    _shortcuts = Keymap.buildShortcuts(platform: platform);
 
-    // 键位优先级说明(留给 term / 整合角色):
-    //   Flutter 的 Shortcuts 按“焦点叶子 → 祖先”的顺序派发按键,焦点终端
-    //   (xterm TerminalView)会先拿到事件。像 Alt+方向、Alt+Shift+方向 这类
-    //   组合,在真终端里本身也是合法输入(会被编码成转义序列发给 shell)。
-    //   若希望它们始终当作“窗格快捷键”(WT 的行为),需要终端角色对这些组合
-    //   返回 KeyEventResult.ignored(放行给祖先 Shortcuts)。本装配已正确注册
-    //   快捷键;“谁先吃到键”由终端是否放行决定。
-    //   TODO(集成): 在 TerminalView 外层用 Focus.onKeyEvent 过滤掉 keymap 里的
-    //     组合键并返回 ignored,或配置 xterm 不消费这些组合。
-    return Shortcuts(
-      shortcuts: Keymap.buildShortcuts(platform: platform),
-      child: Actions(
-        actions: <Type, Action<Intent>>{
-          PaneActionIntent: CallbackAction<PaneActionIntent>(
-            onInvoke: (intent) {
-              _dispatch(intent.action);
-              return null;
-            },
-          ),
-        },
-        // FocusScope 提供一个稳定的作用域,但不用 autofocus 抢焦点 ——
-        // 初始焦点交给 PaneTreeView 里“焦点叶子”的终端(它自带 autofocus),
-        // 这样键盘输入能直接进入 shell。
-        child: FocusScope(
-          child: ListenableBuilder(
-            listenable: _controller,
-            builder: (context, _) => _buildBody(),
-          ),
-        ),
+    // 热键接线的关键:用 Focus.onKeyEvent 在按键沿焦点链冒泡到本节点时拦截
+    // 窗格热键。焦点终端(xterm TerminalView)是本 Focus 的后代且持有主焦点,
+    // 按键先到它;它对「非自身文本输入」的组合返回 ignored 后,事件才冒泡到
+    // 这里。其中 Alt+方向、Alt+Shift+± / 方向、Ctrl+Shift+P 默认会被 xterm 的
+    // Alt/Ctrl 输入处理器翻译成转义序列并消费掉 —— 已在 TerminalSession 侧改用
+    // 放行这些组合的输入处理器(见 term/terminal_session.dart),因此它们也能
+    // 冒泡到此处被拦截,返回 handled;其余按键返回 ignored,原样交给终端。
+    return Focus(
+      // 不抢占键盘焦点:主焦点留给终端以保证正常输入;本节点仅作为焦点链上的
+      // 热键拦截器存在(canRequestFocus:false 不影响它作为祖先接收冒泡按键)。
+      canRequestFocus: false,
+      onKeyEvent: _handleKeyEvent,
+      child: ListenableBuilder(
+        listenable: _controller,
+        builder: (context, _) => _buildBody(),
       ),
     );
+  }
+
+  /// 焦点链冒泡到本节点时的按键拦截:命中窗格热键则分派并「吃掉」(handled),
+  /// 其余按键放行(ignored)给终端 / 上层。
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    // 只在按下 / 长按重复时匹配;抬起不触发,避免同一次按键重复分派。
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+
+    final keyboard = HardwareKeyboard.instance;
+    for (final entry in _shortcuts.entries) {
+      if (!entry.key.accepts(event, keyboard)) continue;
+      final intent = entry.value;
+      if (intent is PaneActionIntent) {
+        _dispatch(intent.action);
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
   }
 
   Widget _buildBody() {

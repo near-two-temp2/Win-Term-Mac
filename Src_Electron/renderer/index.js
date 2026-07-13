@@ -50,11 +50,11 @@
     if (manager && typeof manager.destroy === 'function') manager.destroy();
   });
 
-  // TODO(integrator/tab-layer): 关闭最后一个窗格是否退出应用,由主进程/标签层决定;
-  //   PaneManager 目前在最后一格 pane.close 时不做处理(见 panes.js 内 TODO)。
+  // 关闭最后一个窗格:PaneManager 默认执行 window.close()(关掉唯一窗格即关窗)。
+  //   若接入标签层需改为"保留窗口 / 新建标签"等策略,给 create 传 onLastPaneClosed 回调即可,例如:
+  //     PaneManager.create({ container, onLastPaneClosed: (leaf) => tabLayer.closeCurrentTab() });
   //
-  // 备注:renderer/commands.js(window.Commands)与 renderer/io.js(window.IoBridge)是
-  //   可选替代/增强层(命令路由的另一实现 / PTY↔xterm 单点路由),当前未接入——
-  //   PaneManager + terminal.js 已直接覆盖本轮所需的全部功能。如需切换到 Commands 路由或
-  //   IoBridge 数据平面,再在此处替换装配即可。
+  // 备注:PTY↔xterm 的数据平面由 renderer/io.js(window.IoBridge)承担——整个渲染进程
+  //   只订阅一次 pty:data/pty:exit 并按 sessionId 做 O(1) 路由;LeafTerminal(terminal.js)
+  //   内部已接入,无需 integrator 额外装配。
 })();

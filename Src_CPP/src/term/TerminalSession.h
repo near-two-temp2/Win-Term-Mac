@@ -25,6 +25,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include <atomic>
+#include <thread>
 
 // libvterm 的具体类型只在 .cpp 里用到,这里前置声明,保持头文件干净、
 // 不把 <vterm.h> 泄漏给包含者(render/pane 角色包含本头不需要 libvterm)。
@@ -217,6 +219,12 @@ private:
     void* hChild_ = nullptr;          // 子进程 HANDLE
 
     QSocketNotifier* readNotifier_ = nullptr;  // Unix:监听 master fd 可读
+
+    // Windows:ConPTY 无 fd 可交给 QSocketNotifier,改用后台线程阻塞 ReadFile,
+    // 读到的字节经 QMetaObject::invokeMethod 回主线程 feed() 进 libvterm。
+    // (feed 非线程安全,必须回主线程执行。)Unix 平台下这两个成员不使用。
+    std::thread readThread_;
+    std::atomic<bool> readThreadStop_{false};
 };
 
 } // namespace wtm

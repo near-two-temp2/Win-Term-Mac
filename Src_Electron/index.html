@@ -34,10 +34,12 @@
   <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
   <script src="node_modules/xterm-addon-webgl/lib/xterm-addon-webgl.js"></script>
 
-  <!-- 窗格模块(按依赖顺序:核心树 → 键位 → 命令面板 → 叶子终端 → 胶水控制器) -->
+  <!-- 窗格模块(按依赖顺序:核心树 → 键位 → 命令面板 → IO 数据平面 → 叶子终端 → 胶水控制器) -->
   <script src="renderer/pane.js"></script>
   <script src="renderer/keymap.js"></script>
   <script src="renderer/palette.js"></script>
+  <!-- IoBridge:整个渲染进程只订阅一次 PTY 输出/退出,O(1) 路由;须在 terminal.js 之前加载 -->
+  <script src="renderer/io.js"></script>
   <script src="renderer/terminal.js"></script>
   <script src="renderer/panes.js"></script>
 

@@ -10,6 +10,10 @@
 //! - 除释放函数外,其余函数不获取句柄所有权,只借用。
 
 mod pane;
+// io: PTY 双向管道 C ABI(wtm_pty_*)。#[no_mangle] 符号照常从 cdylib 导出,
+// cbindgen 也会写进 include/wintermac_core.h。Unix 目标为真实 forkpty 实现,
+// 非 Unix 目标为功能桩(见 io/bridge.rs 的 cfg 分支)。
+mod io;
 
 use std::os::raw::c_int;
 use std::ptr;

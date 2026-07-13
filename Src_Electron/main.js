@@ -1,28 +1,20 @@
 // 主进程入口:创建 BrowserWindow 并托管 PTY(伪终端)
 // 说明:窗格树的业务逻辑在渲染进程,主进程只负责窗口与真实终端进程的桥接。
+//
+// PTY 会话的生命周期与 IPC 通道统一由 pty.js 的 PtyManager/registerPtyIpc 提供:
+//   - 单点管理多会话(id -> ptyProcess),与窗格树的多个叶子终端一一对应;
+//   - onData/onExit 推送前带 sender.isDestroyed() 守卫,避免窗口关闭后 PTY 仍产
+//     数据时向已销毁的 webContents 发送而抛 "Object has been destroyed"。
+// 因此本文件不再自建 node-pty 会话表,消除与 pty.js 的重复实现。
 
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-const os = require('os');
+const { PtyManager, registerPtyIpc } = require('./pty');
 
-// node-pty 用于生成真实 shell 进程;若原生模块未编译好,降级为 null 以保证窗口仍能启动
-let pty = null;
-try {
-  pty = require('node-pty');
-} catch (err) {
-  console.warn('[main] node-pty 加载失败,终端功能不可用(请运行 npm run rebuild):', err.message);
-}
-
-// 记录所有已创建的 PTY 会话:id -> ptyProcess
-const ptySessions = new Map();
-
-// 根据平台选择默认 shell
-function defaultShell() {
-  if (process.platform === 'win32') {
-    return process.env.COMSPEC || 'powershell.exe';
-  }
-  return process.env.SHELL || '/bin/bash';
-}
+// 托管所有 PTY 会话;registerPtyIpc 把 create/input/resize/kill 通道接到它上面,
+// 通道名与 preload.js 暴露的 window.ptyBridge 严格对齐。
+const ptyManager = new PtyManager();
+registerPtyIpc(ipcMain, ptyManager);
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -45,63 +37,6 @@ function createWindow() {
   return win;
 }
 
-// ---- IPC:渲染进程 <-> PTY 桥接 ----
-
-// 创建一个新的 PTY 会话,返回其 id
-ipcMain.handle('pty:create', (event, opts = {}) => {
-  if (!pty) {
-    return { ok: false, error: 'node-pty 不可用' };
-  }
-  const id = `pty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const shell = opts.shell || defaultShell();
-  const ptyProcess = pty.spawn(shell, [], {
-    name: 'xterm-color',
-    cols: opts.cols || 80,
-    rows: opts.rows || 24,
-    cwd: opts.cwd || os.homedir(),
-    env: process.env,
-  });
-
-  // 将 PTY 输出转发回对应的渲染进程
-  ptyProcess.onData((data) => {
-    event.sender.send('pty:data', { id, data });
-  });
-  ptyProcess.onExit(({ exitCode }) => {
-    event.sender.send('pty:exit', { id, exitCode });
-    ptySessions.delete(id);
-  });
-
-  ptySessions.set(id, ptyProcess);
-  return { ok: true, id };
-});
-
-// 渲染进程键入 -> 写入 PTY
-ipcMain.on('pty:input', (event, { id, data }) => {
-  const p = ptySessions.get(id);
-  if (p) p.write(data);
-});
-
-// 终端尺寸变化 -> 通知 PTY
-ipcMain.on('pty:resize', (event, { id, cols, rows }) => {
-  const p = ptySessions.get(id);
-  if (p) {
-    try {
-      p.resize(cols, rows);
-    } catch (err) {
-      // 尺寸非法时忽略
-    }
-  }
-});
-
-// 关闭某个会话
-ipcMain.on('pty:kill', (event, { id }) => {
-  const p = ptySessions.get(id);
-  if (p) {
-    p.kill();
-    ptySessions.delete(id);
-  }
-});
-
 app.whenReady().then(() => {
   createWindow();
 
@@ -111,14 +46,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  // 退出前清理所有 PTY
-  for (const p of ptySessions.values()) {
-    try {
-      p.kill();
-    } catch (err) {
-      // 忽略
-    }
-  }
-  ptySessions.clear();
+  // 退出前清理所有 PTY,避免遗留孤儿 shell 进程
+  ptyManager.killAll();
   if (process.platform !== 'darwin') app.quit();
 });

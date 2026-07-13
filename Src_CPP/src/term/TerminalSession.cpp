@@ -14,12 +14,15 @@
 
 #include <QSocketNotifier>
 #include <QDebug>
+#include <QByteArray>
+#include <QMetaObject>
 
 #include <cstring>
 #include <cstdlib>
 #include <cerrno>
 #include <array>
 #include <vector>
+#include <string>
 
 // 平台头:PTY 后端各自需要的系统 API。
 #if defined(WTM_PLATFORM_WINDOWS) || defined(_WIN32)
@@ -501,23 +504,93 @@ bool TerminalSession::spawnPty(const QString& program, const QStringList& args,
     hPtyOut_ = outRead;   // shell 写 → 我们读
 
     // --- 3) 用 STARTUPINFOEX 把伪终端挂到子进程 ---
-    // TODO(term/pty-win): 完整落地以下步骤:
-    //   a) InitializeProcThreadAttributeList 两次(拿 size / 真初始化)
-    //   b) UpdateProcThreadAttribute(..., PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hpc, ...)
-    //   c) CreateProcessW(shell, EXTENDED_STARTUPINFO_PRESENT, &siEx, &pi)
-    //   d) 存 pi.hProcess 到 hChild_,CloseHandle(pi.hThread)
-    // 现阶段先不真正起进程,返回 false 并标记未实现,避免「假装完成」。
-    Q_UNUSED(shell);
-    qWarning("TerminalSession(win): ConPTY 子进程创建尚未实现(TODO)");
+    // a) 先探测 attribute list 所需字节数(第一次调用必然「失败」并回填 size)。
+    STARTUPINFOEXW si;
+    ZeroMemory(&si, sizeof(si));
+    si.StartupInfo.cb = sizeof(STARTUPINFOEXW);
 
-    // --- 4) 读线程 ---
-    // TODO(term/pty-win): 起后台线程循环 ReadFile(hPtyOut_) → 通过
-    //   QMetaObject::invokeMethod(this, [..]{ feed(buf,n); }, Qt::QueuedConnection)
-    //   把数据搬回 Qt 主线程喂 libvterm(feed 非线程安全,必须回主线程)。
+    SIZE_T attrSize = 0;
+    ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+        ::HeapAlloc(::GetProcessHeap(), 0, attrSize));
+    if (!si.lpAttributeList) {
+        qWarning("TerminalSession(win): HeapAlloc(attr list) 失败");
+        closePty();
+        return false;
+    }
 
-    // 骨架阶段:资源已分配但进程未起,视为启动失败以保持状态自洽。
-    closePty();
-    return false;
+    // b) 真初始化 + 绑定伪终端属性。
+    if (!::InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attrSize) ||
+        !::UpdateProcThreadAttribute(
+            si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+            hpc, sizeof(hpc), nullptr, nullptr)) {
+        qWarning("TerminalSession(win): 初始化/绑定 ProcThreadAttributeList 失败");
+        ::HeapFree(::GetProcessHeap(), 0, si.lpAttributeList);
+        closePty();
+        return false;
+    }
+
+    // c) 组命令行:shell + 透传 args(CreateProcessW 需要可写缓冲区)。
+    QString cmdline = shell;
+    for (const QString& a : args) {
+        cmdline += QLatin1Char(' ');
+        cmdline += a;
+    }
+    std::wstring wcmd = cmdline.toStdWString();
+    std::vector<wchar_t> cmdBuf(wcmd.begin(), wcmd.end());
+    cmdBuf.push_back(L'\0');
+
+    // 声明我们是个够格的终端(与 Unix 侧对齐,让程序开彩色/交互特性)。
+    ::SetEnvironmentVariableW(L"TERM", L"xterm-256color");
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+    const BOOL created = ::CreateProcessW(
+        nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+        EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+        &si.StartupInfo, &pi);
+
+    ::DeleteProcThreadAttributeList(si.lpAttributeList);
+    ::HeapFree(::GetProcessHeap(), 0, si.lpAttributeList);
+
+    if (!created) {
+        qWarning("TerminalSession(win): CreateProcessW 失败(err=%lu)", ::GetLastError());
+        closePty();
+        return false;
+    }
+
+    hChild_ = pi.hProcess;      // 子进程 HANDLE(closePty 负责收尾)
+    ::CloseHandle(pi.hThread);  // 主线程句柄用不到
+
+    // --- 4) 读线程:阻塞 ReadFile(hPtyOut_) → 回主线程 feed() 进 libvterm ---
+    readThreadStop_.store(false);
+    HANDLE outHandle = reinterpret_cast<HANDLE>(hPtyOut_);
+    readThread_ = std::thread([this, outHandle]() {
+        std::array<char, 8192> buf;
+        for (;;) {
+            DWORD nread = 0;
+            const BOOL ok = ::ReadFile(outHandle, buf.data(),
+                                       static_cast<DWORD>(buf.size()), &nread, nullptr);
+            if (!ok || nread == 0) break;   // 管道关闭 / EOF → shell 退出
+            if (readThreadStop_.load()) break;
+            // feed 非线程安全:把这段字节拷贝进 QByteArray,排队回主线程执行。
+            QByteArray chunk(buf.data(), static_cast<int>(nread));
+            QMetaObject::invokeMethod(this, [this, chunk]() {
+                if (running_) feed(chunk.constData(),
+                                   static_cast<std::size_t>(chunk.size()));
+            }, Qt::QueuedConnection);
+        }
+        // EOF:回主线程宣告子进程退出(带退出码)。
+        QMetaObject::invokeMethod(this, [this]() {
+            if (!running_) return;
+            DWORD code = 0;
+            if (hChild_) ::GetExitCodeProcess(reinterpret_cast<HANDLE>(hChild_), &code);
+            running_ = false;
+            emit childExited(static_cast<int>(code));
+        }, Qt::QueuedConnection);
+    });
+
+    return true;
 }
 
 void TerminalSession::onPtyReadable() {
@@ -541,13 +614,28 @@ void TerminalSession::applyPtyWinsize(int cols, int rows) {
 }
 
 void TerminalSession::closePty() {
-    // TODO(term/pty-win): 若读线程存在,先置停止标志并 join。
+    // 收尾顺序有讲究:ClosePseudoConsole 会阻塞到「所有输出被读完」,
+    // 若读线程已停读则可能挂死。因此先关掉输出读端,让阻塞中的 ReadFile 立即返回、
+    // 读线程退出并被 join,再 ClosePseudoConsole 才安全。
+    readThreadStop_.store(true);
+
+    if (hPtyOut_) {   // 关读端 → 唤醒/结束阻塞的 ReadFile
+        ::CloseHandle(reinterpret_cast<HANDLE>(hPtyOut_));
+        hPtyOut_ = nullptr;
+    }
+    if (readThread_.joinable()) {
+        // 理论上不会从读线程自身调用本函数;万一如此则 detach 以免自 join 死锁。
+        if (std::this_thread::get_id() == readThread_.get_id()) {
+            readThread_.detach();
+        } else {
+            readThread_.join();
+        }
+    }
     if (hPseudoConsole_) {
         ::ClosePseudoConsole(reinterpret_cast<HPCON>(hPseudoConsole_));
         hPseudoConsole_ = nullptr;
     }
-    if (hPtyIn_)  { ::CloseHandle(reinterpret_cast<HANDLE>(hPtyIn_));  hPtyIn_  = nullptr; }
-    if (hPtyOut_) { ::CloseHandle(reinterpret_cast<HANDLE>(hPtyOut_)); hPtyOut_ = nullptr; }
+    if (hPtyIn_) { ::CloseHandle(reinterpret_cast<HANDLE>(hPtyIn_)); hPtyIn_ = nullptr; }
     if (hChild_) {
         ::TerminateProcess(reinterpret_cast<HANDLE>(hChild_), 0);
         ::CloseHandle(reinterpret_cast<HANDLE>(hChild_));

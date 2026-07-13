@@ -72,7 +72,12 @@ class TerminalSession {
     int rows = 24,
     int maxLines = 10000,
   }) {
-    final terminal = Terminal(maxLines: maxLines);
+    final terminal = Terminal(
+      maxLines: maxLines,
+      // 用自定义输入处理器放行「窗格热键」,避免被 xterm 的 Alt/Ctrl 处理器
+      // 翻译成转义序列吞掉(详见 [_PaneAwareInputHandler])。
+      inputHandler: _paneAwareInputHandler,
+    );
 
     final resolvedShell = shell ?? _defaultShell();
     final resolvedEnv = <String, String>{
@@ -182,6 +187,68 @@ class TerminalSession {
   static String? _defaultWorkingDirectory() {
     final env = Platform.environment;
     return env['HOME'] ?? env['USERPROFILE'];
+  }
+}
+
+/// 全局共享的「窗格感知」输入处理器:包一层 xterm 默认处理器,
+/// 对窗格热键组合返回 null(放行),其余委托默认处理器。
+final TerminalInputHandler _paneAwareInputHandler =
+    _PaneAwareInputHandler(defaultInputHandler);
+
+/// 让「窗格热键」不被终端吞掉的输入处理器。
+///
+/// xterm 的 [defaultInputHandler] 由 Keytab / Ctrl / Alt 三个处理器级联而成:
+/// 其中 AltInputHandler 会把 `Alt+X` 翻译成 ESC 前缀序列、CtrlInputHandler 会把
+/// `Ctrl+X` 翻译成控制字符,从而「消费」掉这些按键。这会导致 Windows Terminal
+/// 风格的窗格热键(Alt+方向、Alt+Shift+± / 方向、Ctrl+Shift+P)在真机上根本
+/// 冒泡不到上层快捷键系统 —— 也就是「热键失效」的根因。
+///
+/// 本处理器只做一件事:对下列保留组合返回 null(表示「本终端不处理」,
+/// keyInput 因此返回 false、按键沿焦点链继续冒泡给 PaneWorkspace 的拦截器),
+/// 其余按键一律委托 [defaultInputHandler],终端输入行为保持不变。
+/// 键位与 keymap.dart 的键位表一一对应。
+class _PaneAwareInputHandler implements TerminalInputHandler {
+  const _PaneAwareInputHandler(this._inner);
+
+  final TerminalInputHandler _inner;
+
+  static const Set<TerminalKey> _arrowKeys = <TerminalKey>{
+    TerminalKey.arrowUp,
+    TerminalKey.arrowDown,
+    TerminalKey.arrowLeft,
+    TerminalKey.arrowRight,
+  };
+
+  @override
+  String? call(TerminalKeyboardEvent event) {
+    if (_isReservedPaneHotkey(event)) return null;
+    return _inner.call(event);
+  }
+
+  /// 是否为需要放行给窗格系统的保留热键。
+  static bool _isReservedPaneHotkey(TerminalKeyboardEvent e) {
+    // Ctrl(+Shift)+P:命令面板(仅非 macOS;macOS 走 Cmd,不经 keyInput)。
+    if (e.ctrl && !e.alt) {
+      return e.shift && e.key == TerminalKey.keyP;
+    }
+    // Alt 系列(不与 Ctrl 组合):
+    if (e.alt && !e.ctrl) {
+      // Alt+方向:切焦点;Alt+Shift+方向:调整大小(是否 shift 都保留)。
+      if (_arrowKeys.contains(e.key)) return true;
+      // Alt+Shift+±:向右 / 向下拆分(兼容主键区 = / - 与小键盘 +/-)。
+      if (e.shift) {
+        switch (e.key) {
+          case TerminalKey.equal:
+          case TerminalKey.minus:
+          case TerminalKey.numpadAdd:
+          case TerminalKey.numpadSubtract:
+            return true;
+          default:
+            return false;
+        }
+      }
+    }
+    return false;
   }
 }
 

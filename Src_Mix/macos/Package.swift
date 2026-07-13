@@ -27,7 +27,13 @@ let package = Package(
         // linkerSettings 里 -L 到 target/release、-l wintermac_core。
         .executableTarget(
             name: "Sub",
-            path: "Sources/Sub"
+            path: "Sources/Sub",
+            // TODO(Bridge/term): TerminalPaneView.swift 依赖外部包 SwiftTerm(见其文件头)。
+            //   在把 SwiftTerm 加入本 package 的 dependencies 并让本 target 依赖它之前,
+            //   先把该文件排除在编译之外,使当前占位骨架(AppDelegate + 占位面板)可独立
+            //   `swift build`。接入 SwiftTerm 后删掉此 exclude,并在 AppDelegate 里用
+            //   TerminalPaneView 替换 makePlaceholderPane。
+            exclude: ["TerminalPaneView.swift"]
         )
     ]
 )

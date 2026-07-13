@@ -18,7 +18,13 @@ gtk4 = { version = "0.9", package = "gtk4", features = ["v4_10"] }
 # (pkg-config 找得到 vte-2.91-gtk4)。若 spawn_async 签名报错,按所装 vte4 版本微调。
 vte4 = "0.7"
 
-# TODO(集成): 通过 C ABI 链接 wintermac_core。
+# 共享 Rust 内核:窗格二叉树 + C ABI(wtm_tree_* / wtm_pty_*)。
+# 作为 Rust path 依赖引入即可让 core 的 `#[no_mangle] extern "C"` 符号被链接进
+# 本二进制,从而解析 src/main.rs 里 ffi 模块手写的 `extern "C"` 声明(无需 #[link]
+# 或单独打包 cdylib)。core 侧 build.rs 会同时用 cbindgen 生成 C 头文件。
+wintermac_core = { path = "../core" }
+
+# 说明(历史遗留 TODO):早期计划通过 C ABI 链接 wintermac_core。
 # 方案一(推荐,零手写 FFI):把 core 当作构建依赖,用 bindgen 从
 #   cbindgen 生成的 wintermac_core.h 产出 Rust 绑定;运行时链接 cdylib。
 # 方案二:直接在本 crate 手写 `extern "C"` 声明(见 src/main.rs 中的 ffi 模块桩)。
