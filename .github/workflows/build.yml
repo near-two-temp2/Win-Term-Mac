@@ -118,11 +118,11 @@ jobs:
         working-directory: Src_Mix/linux
     steps:
       - uses: actions/checkout@v4
-      - name: GTK4 依赖
+      - name: GTK4 + VTE 依赖
         working-directory: .
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev
+          sudo apt-get install -y libgtk-4-dev libvte-2.91-gtk4-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -309,9 +309,12 @@ jobs:
       - name: macOS libvterm
         if: runner.os == 'macOS'
         run: brew install libvterm
-      - name: Windows libvterm (vcpkg)
+      # TODO(CPP-Windows): vcpkg 无 libvterm port;Windows 需 vendoring libvterm 源码
+      # 或换用其它 VT 解析(如内置 parser)。暂 continue-on-error,cmake 会因缺 vterm 报错但不阻断矩阵。
+      - name: Windows libvterm (vcpkg,占位)
         if: runner.os == 'Windows'
-        run: vcpkg install libvterm:x64-windows
+        continue-on-error: true
+        run: vcpkg install libvterm:x64-windows || echo "libvterm 不在 vcpkg,待 vendoring"
       - name: 安装 Qt6 (aqtinstall)
         uses: jurplel/install-qt-action@v4
         with:
