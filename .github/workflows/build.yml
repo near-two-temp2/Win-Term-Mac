@@ -54,6 +54,13 @@ jobs:
       - name: test (窗格树单测)
         continue-on-error: true
         run: cargo test --verbose
+      - name: 上传 Windows 可执行文件
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Src_Rust-windows-exe
+          path: Src_Rust/target/debug/*.exe
+          if-no-files-found: warn
 
   # ============================================================
   # 方案 2 · Src_Mix —— 共享 Rust 内核(C ABI) + Linux GTK4 宿主 + macOS Swift 前端
@@ -192,6 +199,13 @@ jobs:
       - name: package (electron-builder --dir)
         continue-on-error: true
         run: npm run pack
+      - name: 上传 Windows 免安装包
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Src_Electron-windows
+          path: Src_Electron/dist/win-unpacked/**
+          if-no-files-found: warn
 
   # ============================================================
   # 方案 5 · Src_Flutter —— Flutter 桌面
@@ -303,3 +317,14 @@ jobs:
       - name: test (窗格树单测)
         continue-on-error: true
         run: go test ./...
+      - name: 生成 Windows 可执行文件
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: go build -o winterm-go.exe .
+      - name: 上传 Windows 可执行文件
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Src_Golang-windows-exe
+          path: Src_Golang/winterm-go.exe
+          if-no-files-found: warn
