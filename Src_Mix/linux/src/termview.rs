@@ -118,16 +118,15 @@ impl TermView {
     /// spawn 用户默认 shell 作为终端子进程。
     fn spawn_shell(&self) {
         let shell = user_shell();
+        // vte4 0.8 的 spawn_async argv 形参是 &[&str],把 shell 路径转成 &str。
+        let shell_str = shell.to_str().unwrap_or("/bin/sh");
         let cwd = home_dir();
         let terminal_for_cb = self.terminal.clone();
 
-        // TODO(集成/版本): 不同 vte4 版本 spawn_async 的形参略有差异
-        // (argv/envv 的 &[&Path] vs &[&str]、child_setup 是否包 Option<Box_> 等)。
-        // 若编译报签名不匹配,按所选 vte4 版本的文档微调本次调用即可,语义不变。
         self.terminal.spawn_async(
             PtyFlags::DEFAULT,
-            cwd.as_deref(),                 // working_directory: Option<&str>
-            &[shell.as_path()],             // argv: 只有 shell 本身(登录 shell 交互模式)
+            cwd.as_deref(),                 // working_directory
+            &[shell_str],                   // argv: 只有 shell 本身(登录 shell 交互模式)
             &[],                            // envv: 空 = 继承父进程环境
             glib::SpawnFlags::DEFAULT,
             || {},                          // child_setup: 无需额外设置
