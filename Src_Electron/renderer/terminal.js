@@ -61,32 +61,50 @@
 
     term.open(host);
 
-    // 3) 尝试 WebGL 加速,失败则回退默认渲染
-    try {
-      const webgl = new WebglAddon.WebglAddon();
-      // WebGL 上下文丢失(GPU 驱动重置、显卡切换、长时间隐藏)时自动卸载加速插件,
-      // 让 xterm 回退到默认 canvas/DOM 渲染,避免终端变白屏。
-      if (typeof webgl.onContextLoss === 'function') {
-        webgl.onContextLoss(() => {
-          try {
-            webgl.dispose();
-          } catch (e) {
-            /* 忽略 */
-          }
-        });
-      }
-      term.loadAddon(webgl);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn('[terminal] WebGL 不可用,使用默认渲染:', err.message);
+    let session = null; // IoBridge 会话句柄(异步就绪;connect 立即返回)
+    let disposed = false;
+    let webglLoaded = false; // WebGL 加速插件是否已成功加载(只加载一次)
+    const cleanups = [];
+
+    // 3) WebGL 加速:仅在 host 已连接文档且尺寸非零时启用。
+    // 在游离 / 0 尺寸的 canvas 上初始化 GL 上下文,在无独显(SwiftShader 软件渲染)的
+    // 环境下会拖垮渲染/GPU 进程,导致空白窗口。故若此刻尚无尺寸,则跳过,交由
+    // 下方 ResizeObserver 在首次拿到真实尺寸时再补装(maybeLoadWebgl)。
+    function hostHasSize() {
+      if (host && host.isConnected === false) return false;
+      return !!host && host.clientWidth > 0 && host.clientHeight > 0;
     }
+    function maybeLoadWebgl() {
+      if (webglLoaded || disposed) return;
+      if (typeof WebglAddon === 'undefined' || !WebglAddon.WebglAddon) return;
+      if (!hostHasSize()) return; // 尺寸就绪前不碰 GL,避免软件渲染环境崩溃
+      try {
+        const webgl = new WebglAddon.WebglAddon();
+        // WebGL 上下文丢失(GPU 驱动重置、显卡切换、长时间隐藏)时自动卸载加速插件,
+        // 让 xterm 回退到默认 canvas/DOM 渲染,避免终端变白屏。
+        if (typeof webgl.onContextLoss === 'function') {
+          webgl.onContextLoss(() => {
+            try {
+              webgl.dispose();
+            } catch (e) {
+              /* 忽略 */
+            }
+          });
+        }
+        term.loadAddon(webgl);
+        webglLoaded = true;
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[terminal] WebGL 不可用,使用默认渲染:', err.message);
+        webglLoaded = true; // 失败也不再重试,稳定回退到默认渲染
+      }
+    }
+
+    // 首次尝试(host 若已随窗格树挂载并有尺寸,这里即启用 WebGL);否则留待 onResize。
+    maybeLoadWebgl();
 
     // 首次 fit(host 需已有尺寸;若为 0 会在后续 onResize 再 fit)
     safeFit();
-
-    let session = null; // IoBridge 会话句柄(异步就绪;connect 立即返回)
-    let disposed = false;
-    const cleanups = [];
 
     // 容器尺寸变化时自动 fit:用 ResizeObserver 让终端网格跟随窗格布局/窗口尺寸变化,
     // 不必依赖外部显式调用 fit()。用 rAF 合并高频回调,避免拖拽分隔条时频繁 resize。
@@ -97,6 +115,7 @@
         rafPending = true;
         const run = () => {
           rafPending = false;
+          maybeLoadWebgl(); // 尺寸就绪后补装 WebGL(若首次时 host 尚为 0 尺寸)
           fit();
         };
         if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);

@@ -424,10 +424,27 @@
     el.style.height = '100%';
     el.style.overflow = 'hidden';
     leaf.el = el;
+    // 关键:此处不能立即回调 onLeafMount。buildNode 尚未把 el 挂进 container,
+    // 此刻 el 仍是游离(detached)、0 尺寸的。若在此创建 xterm 并启用 WebGL,会在一个
+    // 未连接文档、尺寸为 0 的 canvas 上初始化 GL 上下文——在无独显、走 SwiftShader 软件
+    // 渲染的环境(如 Windows Server)会直接拖垮渲染/GPU 进程,表现为空白窗口、进程数骤降。
+    // 因此改为登记到"待挂载队列",由 render() 在 append(元素已连接文档并具尺寸)之后统一回调。
     if (typeof state.hooks.onLeafMount === 'function') {
-      state.hooks.onLeafMount(leaf);
+      if (!state._pendingMounts) state._pendingMounts = [];
+      state._pendingMounts.push(leaf);
     }
     return el;
+  }
+
+  // 冲刷待挂载队列:此时叶子 el 均已随整棵子树 append 进 container(已连接文档、有尺寸),
+  // 可安全创建终端并启用 WebGL。须在 notifyResize 之前调用,确保 fit 时终端已存在。
+  function flushMounts(state) {
+    const pending = state._pendingMounts;
+    state._pendingMounts = null;
+    if (!pending || typeof state.hooks.onLeafMount !== 'function') return;
+    for (let i = 0; i < pending.length; i++) {
+      state.hooks.onLeafMount(pending[i]);
+    }
   }
 
   function render(state) {
@@ -438,12 +455,16 @@
 
     if (!state.root) return;
 
+    // 本次 render 新建叶子的挂载回调会先入队,待 append 后再统一冲刷(见 ensureLeafEl)。
+    state._pendingMounts = [];
+
     // 最大化:只渲染被最大化的叶子,铺满容器
     if (state.maximized && isLeaf(state.maximized)) {
       const el = ensureLeafEl(state, state.maximized);
       el.style.width = '100%';
       el.style.height = '100%';
       container.appendChild(el);
+      flushMounts(state);
       notifyResize(state);
       return;
     }
@@ -452,6 +473,7 @@
     dom.style.width = '100%';
     dom.style.height = '100%';
     container.appendChild(dom);
+    flushMounts(state);
     notifyResize(state);
   }
 

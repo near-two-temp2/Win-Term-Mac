@@ -105,8 +105,20 @@ pub fn key_to_bytes(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
             Some(maybe_meta(alt, text.as_bytes().to_vec()))
         }
 
-        // Dead(组合用死键)/ Unidentified:此处不处理,交回上层。
-        _ => None,
+        // Dead(组合死键)/ Unidentified 等:winit 0.30 在部分键盘布局 / IME
+        // 直出场景下,logical_key 不是 Character,但 `text` 仍带可打印字符。
+        // 带 Ctrl/Super 的交回上层;否则只要有文本就照送,保证非常规布局也能录入。
+        _ => {
+            if ctrl || logo {
+                return None;
+            }
+            let text = event
+                .text
+                .as_ref()
+                .map(|t| t.as_str())
+                .filter(|t| !t.is_empty())?;
+            Some(maybe_meta(alt, text.as_bytes().to_vec()))
+        }
     }
 }
 

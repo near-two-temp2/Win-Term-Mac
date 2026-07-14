@@ -197,6 +197,14 @@ impl ApplicationHandler for App {
         // wgpu 初始化是异步的,用 pollster 在此阻塞等待完成。
         let gpu = pollster::block_on(GpuState::new(window));
         self.gpu = Some(gpu);
+
+        // 某些平台(尤其 Windows)在 `resumed` 里同步做完 GPU 初始化后,
+        // 首帧窗口可能没有拿到键盘焦点,导致敲键盘收不到 `KeyboardInput`。
+        // 这里显式请求一次焦点并触发首帧重绘,保证键盘链路一开始就通。
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.window.focus_window();
+            gpu.window.request_redraw();
+        }
     }
 
     fn window_event(
@@ -232,11 +240,24 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(new_mods) => {
                 gpu.modifiers = new_mods.state();
             }
+            WindowEvent::Focused(focused) => {
+                // 诊断:确认窗口是否真正拿到键盘焦点(无焦点则收不到 KeyboardInput)。
+                log::debug!("窗口焦点变化: focused={focused}");
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 // 约定:先给 keymap 判窗格热键,非热键再作为输入送进聚焦终端。
                 // TODO(keymap): 接入 keymap 处理 Alt+方向 / Alt+Shift+± 等窗格操作。
                 if let Some(bytes) = input::key_to_bytes(&event, gpu.modifiers) {
-                    let _ = gpu.terminal.write_input(&bytes);
+                    // 诊断:打印将写入 PTY 的字节。据此可区分故障位置——
+                    //   有这行日志但终端无回显 => 写进去了、是渲染没接通(render 侧);
+                    //   敲键完全没有这行日志 => 键根本没产字节(焦点/翻译问题)。
+                    log::debug!("键盘输入 -> PTY {} 字节: {:?}", bytes.len(), bytes);
+                    if let Err(e) = gpu.terminal.write_input(&bytes) {
+                        // 写失败是"敲了没反应"的直接根因,必须显式暴露,不能吞掉。
+                        log::warn!("写入 PTY 失败: {e}");
+                    }
+                    // 有输入即请求重绘,尽快让回显上屏(即便 about_to_wait 已在轮询)。
+                    gpu.window.request_redraw();
                 }
             }
             _ => {}
@@ -251,7 +272,9 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    env_logger::init();
+    // 默认放开到 info:让诊断用的 warn(如"写入 PTY 失败")无需设 RUST_LOG 就可见。
+    // 仍可用 RUST_LOG 覆盖——例如 `RUST_LOG=debug` 可看每次按键产生的 PTY 字节。
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let event_loop = EventLoop::new().expect("创建事件循环失败");
     // 持续重绘(终端有光标闪烁/输出更新);后续可改为按需 Wait。

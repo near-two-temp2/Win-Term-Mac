@@ -212,8 +212,9 @@ void Pane::WalkTree(const Visitor& fn) {
 
 void Pane::WalkTree(const ConstVisitor& fn) const {
     fn(*this);
-    if (firstChild_) firstChild_->WalkTree(fn);
-    if (secondChild_) secondChild_->WalkTree(fn);
+    // 显式转 const&,只命中 const 重载,避免 MSVC C2666 歧义。
+    if (firstChild_) static_cast<const Pane&>(*firstChild_).WalkTree(fn);
+    if (secondChild_) static_cast<const Pane&>(*secondChild_).WalkTree(fn);
 }
 
 void Pane::CollectLeaves(std::vector<Pane*>& out) {

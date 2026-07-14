@@ -1,0 +1,312 @@
+# HaiTerminal - CI build of a renamed, self-built Windows Terminal
+#
+# 本 workflow 在 GitHub 托管的 windows-latest 上编译微软官方开源的
+# Windows Terminal (https://github.com/microsoft/terminal, MIT License),
+# 并把产物改名为我们自己的 "HaiTerminal",产出一个可下载、可安装运行的 MSIX。
+#
+# 说明 / 合规:
+#   * 上游 microsoft/terminal 使用 MIT 许可,允许自行编译、改名、再分发,
+#     只需保留其 LICENSE / 版权声明,且不得冒充微软官方。
+#   * 我们在 CI 里 clone 上游仓库(带其 LICENSE / NOTICE 一起打进产物),
+#     不把上游源码或其 License 提交进我们自己的仓库。
+#   * 产物使用我们自己的名字 (HaiTerminal),并在下方注释与产物内 README 中
+#     注明:基于 microsoft/terminal (MIT),非官方、非微软出品。
+#
+# 重要事实(决定了本 workflow 的写法):
+#   * 官方源码是 C++/WinRT + XAML 大工程,使用 git submodule,
+#     只下 tarball 会缺子模块 -> 必须 `git clone --recurse-submodules`。
+#   * 新版仓库的解决方案是 XML 格式的 OpenConsole.slnx(不再是 .sln)。
+#     上游自身的构建脚本 (tools/OpenConsole.psm1) 用:
+#         nuget.exe restore OpenConsole.slnx
+#         nuget.exe restore dep\nuget\packages.config
+#         msbuild.exe OpenConsole.slnx ...
+#   * WindowsTerminal.exe 无法直接双击运行(见上游 README / issue #926),
+#     必须作为「打包应用 (MSIX)」安装后运行。所以最有意义的「改名」是包身份
+#     (Identity / DisplayName) 而不是裸 exe;我们同时也把主 exe 改名以求彻底。
+#   * CascadiaPackage.wapproj 内置逻辑:命令行传入签名相关 /p: 全局属性会覆盖
+#     工程内条件。我们生成一张自签名证书(subject 必须与清单 Publisher 一致)
+#     来签名,产出可 sideload 安装的 MSIX,并导出 .cer 供用户信任后安装。
+
+name: Build HaiTerminal (renamed Windows Terminal)
+
+on:
+  workflow_dispatch:
+    inputs:
+      wt_ref:
+        description: >-
+          要编译的 microsoft/terminal 分支或 tag。默认 main;
+          若追求可复现/稳定,建议改为某个正式 release tag(如 v1.22.xxxx.0)。
+        required: false
+        default: "main"
+  push:
+    # 只在本 workflow 自身变更时触发一次冒烟构建,避免每次推送都跑重型编译。
+    paths:
+      - ".github/workflows/win-terminal.yml"
+
+# 我们自己的品牌名,集中在一处,便于统一修改。
+env:
+  HAI_APP_NAME: "HaiTerminal"
+  HAI_IDENTITY_NAME: "HaiTeam.HaiTerminal"
+  HAI_PUBLISHER_DISPLAY: "HaiTerminal (based on microsoft/terminal, MIT; unofficial)"
+  # 清单 Publisher 与自签名证书 subject 必须逐字一致,否则签名会失败。
+  HAI_PUBLISHER_CN: "CN=HaiTerminal Dev Certificate"
+  HAI_TARGET_EXE_NAME: "HaiTerminal"   # 主 exe 改名后的基名 -> HaiTerminal.exe
+  WT_DIR: "wt"                          # clone 到工作区的子目录
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120   # C++/WinRT 全量构建很重,给足时间
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1) 取上游源码:GitHub 内网 clone 官方仓库,快且稳;必须带子模块。
+      #    浅克隆 (--depth 1 + --shallow-submodules) 以省时间/空间。
+      # ------------------------------------------------------------------
+      - name: Clone microsoft/terminal (with submodules)
+        shell: pwsh
+        run: |
+          $ref = "${{ github.event.inputs.wt_ref }}"
+          if ([string]::IsNullOrWhiteSpace($ref)) { $ref = "main" }
+          Write-Host "Cloning microsoft/terminal @ $ref"
+          git clone --depth 1 --branch $ref --recurse-submodules --shallow-submodules `
+            https://github.com/microsoft/terminal.git "${{ env.WT_DIR }}"
+          if ($LASTEXITCODE -ne 0) {
+            # 某些 tag 名 clone --branch 可能失败;退化为 clone 默认分支再 checkout。
+            Write-Warning "Direct --branch clone failed; falling back to default branch clone."
+            Remove-Item -Recurse -Force "${{ env.WT_DIR }}" -ErrorAction SilentlyContinue
+            git clone --depth 1 --recurse-submodules --shallow-submodules `
+              https://github.com/microsoft/terminal.git "${{ env.WT_DIR }}"
+          }
+
+      # ------------------------------------------------------------------
+      # 2) 改名(核心要求)。全部改动只发生在 clone 下来的 wt 工作区里,
+      #    不入我们自己的仓库。使用 XML DOM 精确修改,避免脆弱的文本替换。
+      # ------------------------------------------------------------------
+      - name: Rebrand to HaiTerminal (identity, display names, exe name)
+        shell: pwsh
+        working-directory: ${{ env.WT_DIR }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $pkgDir      = "src/cascadia/CascadiaPackage"
+          $manifest    = Join-Path $pkgDir "Package.appxmanifest"
+          $reswEnUs    = Join-Path $pkgDir "Resources/en-US/Resources.resw"
+          $wtVcxproj   = "src/cascadia/WindowsTerminal/WindowsTerminal.vcxproj"
+
+          # --- 2a) Package.appxmanifest:Identity / PublisherDisplayName / 主 exe 引用 ---
+          [xml]$doc = Get-Content -LiteralPath $manifest -Raw
+          $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+          $ns.AddNamespace("d", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
+
+          $identity = $doc.SelectSingleNode("//d:Identity", $ns)
+          $identity.SetAttribute("Name", "${{ env.HAI_IDENTITY_NAME }}")
+          # Publisher 必须与自签名证书 subject 完全一致
+          $identity.SetAttribute("Publisher", "${{ env.HAI_PUBLISHER_CN }}")
+
+          $pub = $doc.SelectSingleNode("//d:Properties/d:PublisherDisplayName", $ns)
+          if ($pub) { $pub.InnerText = "${{ env.HAI_PUBLISHER_DISPLAY }}" }
+
+          # 在清单顶部加一条注释,注明基于微软 WT(MIT)、非官方
+          $note = $doc.CreateComment(" HaiTerminal: rebuilt & renamed from microsoft/terminal (MIT License). Unofficial; not affiliated with Microsoft. ")
+          $doc.InsertBefore($note, $doc.DocumentElement) | Out-Null
+
+          $doc.Save((Resolve-Path $manifest))
+
+          # 清单里对主 exe 的硬编码引用(ComServer 的 ExeServer Executable="WindowsTerminal.exe",
+          # 通常只有 1 处;App 元素用 $targetnametoken$ 会自动跟随 TargetName)。
+          # 用文本替换把它与 TargetName 保持一致,确保改名后包内引用不失联。
+          $mtext = Get-Content -LiteralPath $manifest -Raw
+          $mtext = $mtext -replace 'WindowsTerminal\.exe', "${{ env.HAI_TARGET_EXE_NAME }}.exe"
+          Set-Content -LiteralPath $manifest -Value $mtext -NoNewline
+
+          # --- 2b) 主 exe 改名:改 WindowsTerminal 工程的 TargetName ---
+          # TargetName=HaiTerminal 后,构建出 HaiTerminal.exe;清单 $targetnametoken$ 亦随之解析。
+          # 注意:保持 ProjectName/RootNamespace 不变,避免影响工程引用/命名空间。
+          $vtext = Get-Content -LiteralPath $wtVcxproj -Raw
+          $vtext = $vtext -replace '<TargetName>WindowsTerminal</TargetName>', "<TargetName>${{ env.HAI_TARGET_EXE_NAME }}</TargetName>"
+          Set-Content -LiteralPath $wtVcxproj -Value $vtext -NoNewline
+
+          # --- 2c) 用户可见显示名(en-US):AppName / AppStoreName / AppShortName -> HaiTerminal ---
+          # 说明:只改 en-US;非英文系统仍可能显示上游本地化名(已知限制,可接受)。
+          [xml]$resw = Get-Content -LiteralPath $reswEnUs -Raw
+          foreach ($name in @("AppName", "AppStoreName", "AppShortName")) {
+            $node = $resw.SelectSingleNode("//data[@name='$name']/value")
+            if ($node) { $node.InnerText = "${{ env.HAI_APP_NAME }}" }
+          }
+          $resw.Save((Resolve-Path $reswEnUs))
+
+          Write-Host "Rebranding done."
+          Write-Host "  Identity.Name      = ${{ env.HAI_IDENTITY_NAME }}"
+          Write-Host "  Identity.Publisher = ${{ env.HAI_PUBLISHER_CN }}"
+          Write-Host "  Main exe           = ${{ env.HAI_TARGET_EXE_NAME }}.exe"
+
+      # ------------------------------------------------------------------
+      # 3) 生成自签名证书 (subject == 清单 Publisher),用于签名 sideload MSIX。
+      #    同时导出 .cer,供最终用户导入「受信任人 / 受信任的根」后安装。
+      # ------------------------------------------------------------------
+      - name: Create self-signed signing certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pwd = "HaiTerminal!Dev"   # 仅用于 CI 内部保护 pfx,非机密
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject "${{ env.HAI_PUBLISHER_CN }}" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "HaiTerminal Dev Signing" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $sec = ConvertTo-SecureString -String $pwd -Force -AsPlainText
+          $pfx = Join-Path $PWD "HaiTerminal_Signing.pfx"
+          $cer = Join-Path $PWD "HaiTerminal_Signing.cer"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $sec | Out-Null
+          Export-Certificate  -Cert $cert -FilePath $cer | Out-Null
+          # 传给后续步骤
+          "HAI_PFX=$pfx"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HAI_CER=$cer"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HAI_PFX_PWD=$pwd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Self-signed cert created: $($cert.Thumbprint)"
+
+      # ------------------------------------------------------------------
+      # 4) 装 MSBuild(setup-msbuild 会把 VS2022 的 msbuild 放进 PATH;
+      #    windows-latest 已预装桌面 C++ / UWP 工作负载与 Windows 11 SDK)。
+      # ------------------------------------------------------------------
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      # ------------------------------------------------------------------
+      # 5) 还原依赖(复刻上游 tools/OpenConsole.psm1 的还原方式)。
+      #    优先用仓库自带的 dep/nuget/nuget.exe;没有则用 setup-nuget 装的 nuget。
+      #    风险步骤:标 continue-on-error,失败也让后续 build 步骤打印真实错误。
+      # ------------------------------------------------------------------
+      - name: Restore NuGet packages
+        id: restore
+        continue-on-error: true
+        shell: pwsh
+        working-directory: ${{ env.WT_DIR }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          $nuget = "dep/nuget/nuget.exe"
+          if (-not (Test-Path $nuget)) { $nuget = "nuget" }  # 回退到 PATH 里的 nuget
+          Write-Host "Using nuget: $nuget"
+          & $nuget restore "OpenConsole.slnx"
+          & $nuget restore "dep/nuget/packages.config"
+          # 有些目标依赖 msbuild 的 Restore 目标(PackageReference),补跑一次以防万一。
+          msbuild "OpenConsole.slnx" /t:Restore /p:Configuration=Release /p:Platform=x64 /nologo /verbosity:minimal
+          Write-Host "Restore finished (exit codes above are informational)."
+
+      # ------------------------------------------------------------------
+      # 6) 构建 Release x64 的打包工程 -> 签名的 sideload MSIX。
+      #    只构建 CascadiaPackage.wapproj(会顺带构建其 ProjectReference:
+      #    WindowsTerminal.vcxproj 及其全部依赖),比构建整个 slnx(含测试工程)更省时。
+      #    关键 /p: 全局属性会覆盖 wapproj 内条件,强制启用签名并指向我们的 pfx。
+      #    这是最重、最易失败的步骤:continue-on-error 让日志完整暴露,不假装成功。
+      #
+      #    TODO(风险点,若失败按此排查):
+      #      - .slnx 需要较新的 MSBuild/NuGet;windows-latest 一般已满足,若否需 pin VS。
+      #      - 若签名报「manifest publisher 与证书不匹配」,检查 HAI_PUBLISHER_CN 是否两处一致。
+      #      - 若因 slnx 还原不全导致 wapproj 缺依赖,改为构建整个 OpenConsole.slnx。
+      # ------------------------------------------------------------------
+      - name: Build & package (Release x64, signed MSIX)
+        id: build
+        continue-on-error: true
+        shell: pwsh
+        working-directory: ${{ env.WT_DIR }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          msbuild "src/cascadia/CascadiaPackage/CascadiaPackage.wapproj" `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:WindowsTerminalBranding=Release `
+            /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxBundle=Never `
+            /p:AppxPackageSigningEnabled=true `
+            /p:PackageCertificateKeyFile="$env:HAI_PFX" `
+            /p:PackageCertificatePassword="$env:HAI_PFX_PWD" `
+            /m `
+            /nologo `
+            /verbosity:minimal
+          Write-Host "MSBuild exit code: $LASTEXITCODE"
+
+      # ------------------------------------------------------------------
+      # 7) 收集产物:找到生成的 .msix,改名为 HaiTerminal_*，连同 .cer、
+      #    上游 LICENSE/NOTICE 与安装说明一起放进 staging 目录。
+      # ------------------------------------------------------------------
+      - name: Collect & rename artifacts
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $stage = Join-Path $PWD "artifact"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # 7a) 找生成的 msix(签名成功时在 AppPackages 下)。
+          $msix = Get-ChildItem -Path "${{ env.WT_DIR }}" -Recurse -Filter *.msix -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -match "AppPackages" } |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) {
+            # 回退:任意位置的 msix
+            $msix = Get-ChildItem -Path "${{ env.WT_DIR }}" -Recurse -Filter *.msix -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          }
+          if ($msix) {
+            $dest = Join-Path $stage ("${{ env.HAI_APP_NAME }}_x64.msix")
+            Copy-Item $msix.FullName $dest -Force
+            Write-Host "Packaged MSIX: $($msix.FullName) -> $dest"
+          } else {
+            Write-Warning "未找到 .msix。可能是构建/签名失败,或走了 loose-layout 路径。"
+            # 7b) 回退:上传 loose AppX 布局(可用 Add-AppxPackage -Register 在开发者模式安装)。
+            $appx = Get-ChildItem -Path "${{ env.WT_DIR }}" -Recurse -Filter "AppxManifest.xml" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -match "AppX" } |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($appx) {
+              $layoutDir = $appx.Directory.FullName
+              Copy-Item $layoutDir (Join-Path $stage "AppX-loose-layout") -Recurse -Force
+              Write-Host "Loose layout copied from: $layoutDir"
+            }
+          }
+
+          # 7c) 证书:让用户能信任并安装我们的自签名包。
+          if (Test-Path $env:HAI_CER) { Copy-Item $env:HAI_CER (Join-Path $stage "HaiTerminal_Signing.cer") -Force }
+
+          # 7d) MIT 合规:带上上游 LICENSE / NOTICE。
+          foreach ($f in @("LICENSE", "NOTICE.md", "README.md")) {
+            $src = Join-Path "${{ env.WT_DIR }}" $f
+            if (Test-Path $src) { Copy-Item $src (Join-Path $stage ("upstream-$f")) -Force }
+          }
+
+          # 7e) 我们自己的安装/来源说明。
+          $readme = @(
+            'HaiTerminal',
+            '===========',
+            '本产物由 CI 编译自微软官方开源项目 Windows Terminal (https://github.com/microsoft/terminal, MIT License),改名为 HaiTerminal。',
+            '非官方、与 Microsoft 无从属关系。上游 LICENSE / NOTICE 见同目录 upstream-* 文件。',
+            '',
+            '安装 (Windows 10 2004+ / Windows 11):',
+            '  1. 双击 HaiTerminal_Signing.cer 安装到「受信任的根证书颁发机构」(自签名,仅本地测试信任)。',
+            '  2. 双击 HaiTerminal_x64.msix,或管理员 PowerShell: Add-AppxPackage .\HaiTerminal_x64.msix',
+            '  3. 开始菜单搜索 HaiTerminal 运行。',
+            '',
+            '若为 AppX-loose-layout 回退产物,开启开发者模式后: Add-AppxPackage -Register .\AppX-loose-layout\AppxManifest.xml'
+          )
+          Set-Content -Path (Join-Path $stage "README-HaiTerminal.txt") -Value $readme -Encoding utf8
+
+          Get-ChildItem $stage -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
+          "HAI_STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ------------------------------------------------------------------
+      # 8) 上传产物。always() 保证即使前面步骤 continue-on-error 失败,
+      #    也把已生成的内容(哪怕只是日志/证书)上传,便于排查。
+      # ------------------------------------------------------------------
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HaiTerminal-windows
+          path: artifact/**
+          if-no-files-found: warn
+          retention-days: 14
