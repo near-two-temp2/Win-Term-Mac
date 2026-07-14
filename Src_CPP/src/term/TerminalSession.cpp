@@ -164,12 +164,18 @@ bool TerminalSession::start(const QString& program, const QStringList& args,
         /* sb_pushline */ nullptr,   // TODO(term): scrollback —— 回滚缓冲后续实现
         /* sb_popline  */ nullptr,
     };
-    vterm_screen_set_callbacks(screen_, &kCallbacks, this);
-    vterm_screen_reset(screen_, 1);
 
+    // 先把 cols_/rows_ 与影子网格 grid_ 备好,再挂回调并 reset。
+    // 原因:vterm_screen_reset() 会同步回调 cbDamage/cbMoveCursor,回调链会经
+    // refreshCells 写 grid_[r*cols_+c]。若此时 cols_/rows_ 仍为 0、grid_ 未分配,
+    // 就只能靠 refreshCells 的越界钳制侥幸不崩。这里改成「先初始化状态再触发回调」,
+    // 让回调始终面对一块尺寸正确、已分配的网格,消除该时序隐患。
     cols_ = cols;
     rows_ = rows;
     grid_.assign(static_cast<std::size_t>(cols_) * rows_, Cell{});
+
+    vterm_screen_set_callbacks(screen_, &kCallbacks, this);
+    vterm_screen_reset(screen_, 1);
 
     // --- 2) 起 PTY + shell ---
     if (!spawnPty(program, args, cols, rows)) {
@@ -545,9 +551,16 @@ bool TerminalSession::spawnPty(const QString& program, const QStringList& args,
 
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
+    // 创建标志:
+    //   EXTENDED_STARTUPINFO_PRESENT —— 必须,才能让内核读到 lpAttributeList 里
+    //     绑定的 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,把子进程附到伪终端。
+    //   CREATE_NO_WINDOW —— 子进程(cmd/powershell 属 console 子系统)默认会
+    //     分配并显示一个真实控制台窗口,那正是「第二个黑窗口」的来源。子进程已
+    //     经由伪终端拿到输入/输出,不需要真实控制台,故显式抑制其窗口。
+    //     与 ConPTY 组合安全:伪终端挂接不受该标志影响。
     const BOOL created = ::CreateProcessW(
         nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
-        EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, nullptr,
         &si.StartupInfo, &pi);
 
     ::DeleteProcThreadAttributeList(si.lpAttributeList);
@@ -574,6 +587,17 @@ bool TerminalSession::spawnPty(const QString& program, const QStringList& args,
             if (!ok || nread == 0) break;   // 管道关闭 / EOF → shell 退出
             if (readThreadStop_.load()) break;
             // feed 非线程安全:把这段字节拷贝进 QByteArray,排队回主线程执行。
+            //
+            // 跨线程生命周期契约(勿破坏,否则回到 use-after-free):
+            //   1) 目标 this 是主线程 QObject,QueuedConnection 会把仿函数投递到
+            //      this 所在(主)线程的事件队列;
+            //   2) 析构必经 shutdown()->closePty(),后者先 ClosePseudoConsole 唤醒并
+            //      join 本读线程,「join 完成」才继续释放 vt_/QObject —— 即对象存活
+            //      期覆盖本线程的整个投递动作;
+            //   3) 已入队但未派发的仿函数,会在 ~QObject 里被 removePostedEvents 清掉,
+            //      不会投给已析构对象;
+            //   4) 兜底:仿函数体再判一次 running_(shutdown 会先置 false),即便被派发
+            //      也不会喂进正在拆除的 vterm。feed() 内另有 vt_ 判空。
             QByteArray chunk(buf.data(), static_cast<int>(nread));
             QMetaObject::invokeMethod(this, [this, chunk]() {
                 if (running_) feed(chunk.constData(),
@@ -614,15 +638,23 @@ void TerminalSession::applyPtyWinsize(int cols, int rows) {
 }
 
 void TerminalSession::closePty() {
-    // 收尾顺序有讲究:ClosePseudoConsole 会阻塞到「所有输出被读完」,
-    // 若读线程已停读则可能挂死。因此先关掉输出读端,让阻塞中的 ReadFile 立即返回、
-    // 读线程退出并被 join,再 ClosePseudoConsole 才安全。
+    // 收尾顺序对齐微软官方 ConPTY 样例,规避两类实测问题(挂死 / 竞态崩溃):
+    //   反例(旧写法):先 CloseHandle(hPtyOut_) 再 join 再 ClosePseudoConsole。
+    //     读线程此刻正阻塞在这个读端句柄上的 ReadFile —— 在另一线程把它正在等待的
+    //     句柄关掉,是竞态未定义行为;且伪终端仍持写端未关,ClosePseudoConsole
+    //     随后可能挂死(旧注释亦已承认该风险)。
+    //   正解:先 ClosePseudoConsole。它会关掉输出管道的「写端」,阻塞中的 ReadFile
+    //     立即以 ERROR_BROKEN_PIPE 干净返回,读线程自然退出;此时才 join,再关我们
+    //     这侧的句柄。整个过程读线程始终持有合法的读端句柄,不存在「读到一半句柄被抽走」。
     readThreadStop_.store(true);
 
-    if (hPtyOut_) {   // 关读端 → 唤醒/结束阻塞的 ReadFile
-        ::CloseHandle(reinterpret_cast<HANDLE>(hPtyOut_));
-        hPtyOut_ = nullptr;
+    // 1) 关伪终端:终止挂接的子进程,并从写端关闭输出管道 → 唤醒阻塞的 ReadFile。
+    if (hPseudoConsole_) {
+        ::ClosePseudoConsole(reinterpret_cast<HPCON>(hPseudoConsole_));
+        hPseudoConsole_ = nullptr;
     }
+
+    // 2) 等读线程收敛(ReadFile 已返回 → 线程跑完 break 后退出)。
     if (readThread_.joinable()) {
         // 理论上不会从读线程自身调用本函数;万一如此则 detach 以免自 join 死锁。
         if (std::this_thread::get_id() == readThread_.get_id()) {
@@ -631,11 +663,12 @@ void TerminalSession::closePty() {
             readThread_.join();
         }
     }
-    if (hPseudoConsole_) {
-        ::ClosePseudoConsole(reinterpret_cast<HPCON>(hPseudoConsole_));
-        hPseudoConsole_ = nullptr;
-    }
-    if (hPtyIn_) { ::CloseHandle(reinterpret_cast<HANDLE>(hPtyIn_)); hPtyIn_ = nullptr; }
+
+    // 3) 读线程已停,再关我们这侧的管道句柄(此刻绝无 pending ReadFile)。
+    if (hPtyOut_) { ::CloseHandle(reinterpret_cast<HANDLE>(hPtyOut_)); hPtyOut_ = nullptr; }
+    if (hPtyIn_)  { ::CloseHandle(reinterpret_cast<HANDLE>(hPtyIn_));  hPtyIn_  = nullptr; }
+
+    // 4) 子进程兜底回收(ClosePseudoConsole 一般已让其退出,这里防其未退)。
     if (hChild_) {
         ::TerminateProcess(reinterpret_cast<HANDLE>(hChild_), 0);
         ::CloseHandle(reinterpret_cast<HANDLE>(hChild_));

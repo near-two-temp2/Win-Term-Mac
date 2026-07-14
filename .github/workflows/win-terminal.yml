@@ -149,7 +149,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $pwd = "HaiTerminal!Dev"   # 仅用于 CI 内部保护 pfx,非机密
+          $certPwd = "HaiTerminal!Dev"   # 仅用于 CI 内部保护 pfx,非机密(勿命名 $pwd,会覆盖自动变量 $PWD)
           $cert = New-SelfSignedCertificate `
             -Type Custom `
             -Subject "${{ env.HAI_PUBLISHER_CN }}" `
@@ -157,7 +157,7 @@ jobs:
             -FriendlyName "HaiTerminal Dev Signing" `
             -CertStoreLocation "Cert:\CurrentUser\My" `
             -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
-          $sec = ConvertTo-SecureString -String $pwd -Force -AsPlainText
+          $sec = ConvertTo-SecureString -String $certPwd -Force -AsPlainText
           $pfx = Join-Path $PWD "HaiTerminal_Signing.pfx"
           $cer = Join-Path $PWD "HaiTerminal_Signing.cer"
           Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $sec | Out-Null
@@ -165,7 +165,7 @@ jobs:
           # 传给后续步骤
           "HAI_PFX=$pfx"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "HAI_CER=$cer"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "HAI_PFX_PWD=$pwd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HAI_PFX_PWD=$certPwd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Self-signed cert created: $($cert.Thumbprint)"
 
       # ------------------------------------------------------------------

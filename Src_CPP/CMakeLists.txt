@@ -83,6 +83,15 @@ qt_add_executable(wintermmac
     ${SOURCES}
 )
 
+# ---- Windows:走 GUI 子系统,别弹黑控制台 ----
+# 默认 qt_add_executable 在 MSVC 下按「console 子系统」链接,启动时 Windows 会
+# 额外分配一个黑色控制台窗口(与 Qt 的 GUI 窗口并存 → 用户看到两个窗口)。
+# 设 WIN32_EXECUTABLE ON 让链接器改用 /SUBSYSTEM:WINDOWS(GUI 子系统),
+# 入口改为 WinMain —— 该入口由 qt_add_executable 自动链接的 Qt6::EntryPoint
+# 提供并转调我们的 main(),故源码里的标准 main(argc,argv) 无需改动。
+# 只有 Windows 需要;Unix 下该属性无副作用。
+set_target_properties(wintermmac PROPERTIES WIN32_EXECUTABLE ON)
+
 target_include_directories(wintermmac PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${VTERM_INCLUDE_DIRS}
