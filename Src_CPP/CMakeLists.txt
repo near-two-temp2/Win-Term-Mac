@@ -26,28 +26,42 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 # ---- libvterm(term 角色的 VT 解析核)----
-# 优先 pkg-config,失败再退回手动 find_library/find_path。找不到时给出明确报错,
-# 便于开发者装依赖(如 apt install libvterm-dev / brew install libvterm)。
-# Windows 上 ConPTY 后端目前仍是 TODO 桩(见 src/term/TerminalSession.cpp),
-# 该平台可暂时按需自备 libvterm 或先在 Unix 上验证。
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(VTERM QUIET vterm)
-endif()
+# 三平台统一改用 vendored 源码:third_party/libvterm 自带上游 v0.3.3(纯 C99)
+# 并由其 CMakeLists.txt 编成静态库 target `vterm`(见该目录说明)。原因:
+# vcpkg 无 libvterm port、Windows 也没有系统包,靠 pkg-config/find_library
+# 会在 Windows 上直接 FATAL。vendoring 后不再依赖系统/vcpkg 的 libvterm,
+# Windows 也能一把构建;Unix 亦无需再 apt/brew 装 libvterm-dev。
+#
+# 允许高级用户强制回退系统库:-DWTM_USE_SYSTEM_VTERM=ON 时改走 pkg-config/
+# find_library 老路径(便于发行版打包接系统共享库)。默认 OFF = 用 vendored。
+option(WTM_USE_SYSTEM_VTERM "Link the system/vcpkg libvterm instead of the vendored copy" OFF)
 
-if(NOT VTERM_FOUND)
-    find_path(VTERM_INCLUDE_DIRS NAMES vterm.h)
-    find_library(VTERM_LIBRARIES NAMES vterm)
-    if(VTERM_INCLUDE_DIRS AND VTERM_LIBRARIES)
-        set(VTERM_FOUND TRUE)
+if(WTM_USE_SYSTEM_VTERM)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(VTERM QUIET vterm)
     endif()
-endif()
 
-if(NOT VTERM_FOUND)
-    message(FATAL_ERROR
-        "libvterm not found. Install it (apt install libvterm-dev / "
-        "brew install libvterm / vcpkg install libvterm) or point CMake at it "
-        "via VTERM_INCLUDE_DIRS and VTERM_LIBRARIES.")
+    if(NOT VTERM_FOUND)
+        find_path(VTERM_INCLUDE_DIRS NAMES vterm.h)
+        find_library(VTERM_LIBRARIES NAMES vterm)
+        if(VTERM_INCLUDE_DIRS AND VTERM_LIBRARIES)
+            set(VTERM_FOUND TRUE)
+        endif()
+    endif()
+
+    if(NOT VTERM_FOUND)
+        message(FATAL_ERROR
+            "WTM_USE_SYSTEM_VTERM=ON but libvterm not found. Install it "
+            "(apt install libvterm-dev / brew install libvterm) or point CMake "
+            "at it via VTERM_INCLUDE_DIRS and VTERM_LIBRARIES; or set "
+            "WTM_USE_SYSTEM_VTERM=OFF to use the vendored copy.")
+    endif()
+else()
+    # vendored:构建静态库 target `vterm`,include/link 全走它导出的属性。
+    add_subdirectory(third_party/libvterm)
+    set(VTERM_LIBRARIES vterm)          # 已带 PUBLIC include,无需再设 INCLUDE_DIRS
+    set(VTERM_INCLUDE_DIRS "")
 endif()
 
 # ---- 源码组织(整合层收口:各角色 .cpp 汇总到一个可执行目标)----

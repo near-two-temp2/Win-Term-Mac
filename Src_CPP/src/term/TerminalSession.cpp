@@ -664,8 +664,10 @@ void TerminalSession::handleVTermOutputFwd(const char* b, std::size_t n) { handl
 
 } // namespace wtm
 
-// ---- CMake 集成 TODO -------------------------------------------------------
-// 顶层 CMakeLists.txt 需要:
-//   1) find libvterm(pkg-config 或 FindVTerm);target_link_libraries(... vterm)
-//   2) 把本文件加入 SOURCES:src/term/TerminalSession.cpp
-// (集成由 app/build 角色统一收口,故本角色不改 CMakeLists,仅在此留说明。)
+// ---- CMake 集成(已收口)---------------------------------------------------
+// 顶层 CMakeLists.txt 现状:
+//   1) libvterm 走 vendored 源码:add_subdirectory(third_party/libvterm) 编出
+//      静态库 target `vterm`,并 target_link_libraries(wintermmac ... vterm)。
+//      三平台(含 Windows/MSVC)统一构建,不再依赖 pkg-config / vcpkg。
+//      (可用 -DWTM_USE_SYSTEM_VTERM=ON 强制回退系统库。)
+//   2) 本文件已在 SOURCES:src/term/TerminalSession.cpp。
