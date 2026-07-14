@@ -218,7 +218,12 @@ jobs:
         working-directory: ${{ env.WT_DIR }}
         run: |
           $ErrorActionPreference = "Continue"
+          # 单独构建 wapproj 时 $(SolutionDir) 不会自动设置,而 WT 各工程靠它找根目录的
+          # common.openconsole.props / src\common.build.pre.props 等;显式传 WT 根绝对路径(带尾反斜杠)。
+          $slnDir = (Get-Location).Path
+          if (-not $slnDir.EndsWith('\')) { $slnDir += '\' }
           msbuild "src/cascadia/CascadiaPackage/CascadiaPackage.wapproj" `
+            /p:SolutionDir="$slnDir" `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:WindowsTerminalBranding=Release `
